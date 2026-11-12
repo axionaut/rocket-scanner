@@ -258,7 +258,8 @@
       return { eligible: false, reason: 'Swap circuit breaker active (prior swap stopped out)' };
     }
 
-    const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 3.00;
+    const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 50.0;
+    const minLossPct = Number.isFinite(options.minLossPct) ? Number(options.minLossPct) : 0.75;
     const maxLossRsLimit = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 250.0;
     // Profit-underwritten budget: loss is strictly bounded by available banked profit from 5-day pool
     const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : 0;
@@ -318,10 +319,9 @@
         continue;
       }
 
-      // Dwell time: protect freshly entered positions
-      const firstAt = Number(h.firstAt || h.entryAt || h.at || 0);
-      if (firstAt > 0 && (now - firstAt) < minDwellMs) {
-        freshEntriesCount++;
+      const lossPct = ((avgCost - ltp) / avgCost) * 100;
+      // Skip near-breakeven spread noise (-0.01% to -0.49%)
+      if (lossPct < minLossPct) {
         continue;
       }
 
@@ -335,14 +335,9 @@
         continue; // Skip stocks that are actively bouncing green today
       }
 
-      // Loss percentage check
-      const lossPct = ((avgCost - ltp) / avgCost) * 100;
-      if (lossPct > maxLossPct) {
-        deepLossCount++;
-        continue; // Exceeds shallow threshold (e.g. > 2.5% or 3.0%)
-      }
-
-      // Deficit-aware partial sizing bounded by profit underwriting budget
+      // Deficit-aware partial sizing bounded by profit underwriting budget in absolute rupees.
+      // A deep underwater position (e.g. -5% or -10%) is trimmed by part-selling only as many shares
+      // as the absolute rupee loss budget (maxLossRs) and expected buyer gain allow.
       const lossPerShare = Math.max(0.01, avgCost - ltp);
       const maxSharesByLoss = Math.floor(maxLossRs / lossPerShare);
       if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
@@ -361,26 +356,12 @@
         continue;
       }
 
-      // Expectancy Hurdle: the buyer's potential target gain must be >= the sacrifice's realized loss
-      // This ensures that when the buyer reaches its target, the swap is net profitable or breakeven
-      const buyerSharesFunded = Math.floor(totalFunding / (buyerPx * 1.003));
-      const expectedGainRs = buyerSharesFunded * buyerPx * (targetPct / 100);
-      const maxSharesByGain = Math.floor(expectedGainRs / lossPerShare);
-      if (maxSharesByGain < sharesToSell) {
-        sharesToSell = maxSharesByGain;
-        if (sharesToSell <= 0) continue;
-        liberatedGross = sharesToSell * ltp;
-        liberatedUsable = liberatedGross * usableCreditFactor;
-        totalFunding = availableCash + liberatedUsable;
-        if (totalFunding < buyerPx || totalFunding < minTicket) continue;
-      }
-
+      // Profit-Underwritten Loss Check: loss in absolute rupees must be fully covered
+      // by available banked profit (maxLossRs). Deep underwater positions (-5%, -10%)
+      // can be trimmed by part-selling up to the rupee budget.
       const lossRs = Math.max(0, sharesToSell * (avgCost - ltp));
-      // Resizing changes the buyer's whole-share funding too. Validate the final
-      // quantities rather than retaining the gain estimated before the trim.
       const finalBuyerShares = Math.floor(totalFunding / (buyerPx * 1.003));
-      const finalExpectedGainRs = finalBuyerShares * buyerPx * (targetPct / 100);
-      if (lossRs > maxLossRs || finalBuyerShares < 1 || finalExpectedGainRs + 1e-9 < lossRs) continue;
+      if (lossRs > maxLossRs || finalBuyerShares < 1) continue;
 
       const ler = liberatedUsable / (lossRs || 1);
       sacrifices.push({
@@ -408,14 +389,14 @@
       let specificReason = 'No held positions qualify for sacrifice';
       if (greenRunnersCount === heldPositions.length) {
         specificReason = 'All open positions are profitable; profitable runners are strictly protected';
-      } else if (greenRunnersCount > 0 && (freshEntriesCount + bouncingCount + deepLossCount) > 0) {
-        specificReason = `No stagnant shallow loss candidates (${greenRunnersCount} green, ${freshEntriesCount} fresh, ${bouncingCount} bouncing, ${deepLossCount} deep loss)`;
+      } else if ((greenRunnersCount + freshEntriesCount + bouncingCount) > 0) {
+        specificReason = `No eligible sacrifice candidates (${greenRunnersCount} green, ${freshEntriesCount} fresh, ${bouncingCount} bouncing)`;
       }
       return { eligible: false, buyer, deficit, minTicket, reason: specificReason };
     }
 
-    // Rank sacrifices: lowest lossPct (highest LER) ascending, then lowest lossRs
-    sacrifices.sort((a, b) => a.lossPct - b.lossPct || a.lossRs - b.lossRs);
+    // Rank sacrifices strictly by deepest underwater percentage loss first (worst loser trimmed first)
+    sacrifices.sort((a, b) => (b.lossPct - a.lossPct) || (b.lossRs - a.lossRs));
     const chosen = sacrifices[0];
     const trimLabel = chosen.isPartial ? `Trim ${chosen.sharesToSell}/${chosen.qty} sh` : `Sell full ${chosen.sharesToSell} sh`;
 

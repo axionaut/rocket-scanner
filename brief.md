@@ -1,10 +1,11 @@
-# Active Task: Deployed v1684 / Operational
+# Active Task: Deployed v1685 / Operational
 
-Rocket Scanner v1684 deployed at 2026-11-12 10:01 IST. System operational and in sync with origin/master.
+Rocket Scanner v1685 deployed at 2026-11-12 10:46 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1685:** Streamline PUOS: pure worst-% loss ranking in absolute rupees, partial trims for deep losers, purge dead GTT IDs
 - **v1684:** Smooth running Markov Multi-Horizon, GTT ratcheting, and Opportunity Swap execution
 - **v1683:** Calculate Loss Budget from full 5-session rolling pool and eliminate StratGen status jitter
 - **v1682:** Show OS eligibility reason in unfunded GO row tooltips and status
