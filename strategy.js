@@ -260,10 +260,9 @@
 
     const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 50.0;
     const minLossPct = Number.isFinite(options.minLossPct) ? Number(options.minLossPct) : 0.75;
-    const maxLossRsLimit = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 250.0;
     // Profit-underwritten budget: loss is strictly bounded by available banked profit from 5-day pool
     const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : 0;
-    const maxLossRs = Math.max(0, Math.min(maxLossRsLimit, profitBudget));
+    const maxLossRs = Number.isFinite(options.maxLossRs) ? Math.max(0, Math.min(Number(options.maxLossRs), profitBudget)) : profitBudget;
     const targetPct = Number.isFinite(options.targetPct) ? Number(options.targetPct) : 1.25;
     const minDwellMs = Number.isFinite(options.minDwellMs) ? Number(options.minDwellMs) : 3600000;
     const availableCash = Math.max(0, Number(options.availableCash || 0));
@@ -337,7 +336,7 @@
 
       // Deficit-aware partial sizing bounded by profit underwriting budget in absolute rupees.
       // A deep underwater position (e.g. -5% or -10%) is trimmed by part-selling only as many shares
-      // as the absolute rupee loss budget (maxLossRs) and expected buyer gain allow.
+      // as the absolute rupee loss budget (maxLossRs) allows.
       const lossPerShare = Math.max(0.01, avgCost - ltp);
       const maxSharesByLoss = Math.floor(maxLossRs / lossPerShare);
       if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
@@ -351,8 +350,8 @@
       let liberatedUsable = liberatedGross * usableCreditFactor;
       let totalFunding = availableCash + liberatedUsable;
 
-      // Viability check: total funding must cover at least 1 whole buyer share AND 100% of minTicket
-      if (totalFunding < buyerPx || totalFunding < minTicket) {
+      // Viability check: total funding must cover at least 1 whole buyer share
+      if (totalFunding < buyerPx) {
         continue;
       }
 
