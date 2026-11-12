@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-12 11:06 IST'; // release build date (IST)
-const APP_VERSION=1686;
+const BUILD_TS='2026-11-12 11:44 IST'; // release build date (IST)
+const APP_VERSION=1687;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4645,8 +4645,11 @@ function queuePageLiveReads(names){
       const tasks=[];
       if(pending.has('positions')||pending.has('portfolio'))tasks.push(loadProfitLockStatus());
       if(pending.has('auto')||pending.has('portfolio'))tasks.push(loadAutoBuyStatus());
+      if(pending.has('margins')||pending.has('portfolio')||pending.has('auto')||pending.has('positions'))tasks.push(loadKiteMargins());
       if(pending.has('portfolio')){_lastIndependentInputCheck=0;tasks.push(refreshChangedHelperInputs());}
-      await Promise.allSettled(tasks);schedulePageLivePaint(null,false,pending.has('portfolio')||pending.has('auto'));
+      await Promise.allSettled(tasks);
+      try{renderStats();}catch(_){}
+      schedulePageLivePaint(null,false,pending.has('portfolio')||pending.has('auto')||pending.has('margins'));
     }finally{PAGE_LIVE.reading=false;if(PAGE_LIVE.reads.size)queuePageLiveReads([]);}
   },250);
 }
@@ -4676,7 +4679,7 @@ function startPageLiveStream(){
         _universeLiveAt=Date.now();for(const ignored of patchUniverseDeltasGen(data.quotes,true)){}
       }
       if(data.portfolioRev&&data.portfolioRev!==_seenPortfolioRev){_helperPortfolioRev=data.portfolioRev;_seenPortfolioRev=data.portfolioRev;queuePageLiveReads(['portfolio']);}
-      if(snapshot)queuePageLiveReads(['positions','auto']);
+      if(snapshot)queuePageLiveReads(['positions','auto','margins']);
       schedulePageLivePaint(snapshot?null:data.entry?.at,scoreChanged);
     }catch(e){PAGE_LIVE.metrics.lastError=e.message;retryPageLiveStream(source);}
   };
@@ -5547,9 +5550,14 @@ function getOpportunitySwapForCandidate(s){
     const open = Number(quote?.open || plk?.open || 0);
     const vwap = Number(quote?.vwap || 0);
     const dayChg = Number.isFinite(plk?.dayChg) ? plk.dayChg : (open > 0 ? ((ltp - open) / open) * 100 : 0);
+    const settledQty = plk?.settledQty != null ? Number(plk.settledQty) : (plk?.t1 ? 0 : h.qty);
+    const isT1 = Boolean(plk?.t1 || (plk && settledQty <= 0));
     return {
       symbol: h.symbol,
       qty: h.qty,
+      settledQty,
+      t1: isT1,
+      isT1,
       avgCost,
       ltp,
       open,
@@ -8130,6 +8138,7 @@ async function loadKiteMargins(){
   if(prev!==KITE_MARGINS.net&&!(parseFloat(document.getElementById('fCapital')?.value)>0)&&ALL.length){
     _dualPlanMemo=null;_maxAllocMemo=null;scheduleApplyFilters();
   }
+  try{renderStats();}catch(_){}
 }
 // v1427: the owner's active sell GTTs from Kite, keyed by symbol. The Target column shows these when
 // present - they ARE the exits - instead of a price re-derived from average cost.
@@ -11424,9 +11433,14 @@ function _planDualBasketUncached(rows,capital){
         const open = Number(quote?.open || plk?.open || 0);
         const vwap = Number(quote?.vwap || 0);
         const dayChg = Number.isFinite(plk?.dayChg) ? plk.dayChg : (open > 0 ? ((ltp - open) / open) * 100 : 0);
+        const settledQty = plk?.settledQty != null ? Number(plk.settledQty) : (plk?.t1 ? 0 : h.qty);
+        const isT1 = Boolean(plk?.t1 || (plk && settledQty <= 0));
         return {
           symbol: h.symbol,
           qty: h.qty,
+          settledQty,
+          t1: isT1,
+          isT1,
           avgCost,
           ltp,
           open,
@@ -14851,7 +14865,7 @@ function startStreamRefresh(){
   if(_streamRefreshTimer) return;
   startPageLiveStream();
   if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(()=>{if(!pageLiveHealthy())loadEntryTriggers();},2000);
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(streamRefreshBeat,20000);streamRefreshBeat.at=Date.now();loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(streamRefreshBeat,3000);streamRefreshBeat.at=Date.now();loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){

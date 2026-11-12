@@ -324,14 +324,13 @@
         continue;
       }
 
-      // Momentum failure check: day change must be <= 0 OR ltp <= vwap
       const dayOpen = Number(h.open || h.dayOpen || 0);
-      const vwap = Number(h.vwap || 0);
       const dayChg = Number.isFinite(h.dayChg) ? h.dayChg : (dayOpen > 0 ? ((ltp - dayOpen) / dayOpen) * 100 : 0);
-      const isDeadOrFalling = dayChg <= 0 || (vwap > 0 && ltp <= vwap);
-      if (!isDeadOrFalling) {
-        bouncingCount++;
-        continue; // Skip stocks that are actively bouncing green today
+
+      // T1 / BTST exclusion: stocks bought yesterday release ₹0 usable cash today under SEBI / Zerodha rules
+      const settledQty = Number(h.settledQty != null ? h.settledQty : (h.t1 ? 0 : qty));
+      if (settledQty <= 0 || h.t1 === true || h.isT1 === true) {
+        continue;
       }
 
       // Deficit-aware partial sizing bounded by profit underwriting budget in absolute rupees.
@@ -343,7 +342,7 @@
 
       const effectiveUsableLtp = ltp * usableCreditFactor;
       const sharesNeeded = Math.ceil(deficit / effectiveUsableLtp);
-      let sharesToSell = Math.min(qty, maxSharesByLoss, sharesNeeded);
+      let sharesToSell = Math.min(settledQty, maxSharesByLoss, sharesNeeded);
       if (sharesToSell <= 0) continue;
 
       let liberatedGross = sharesToSell * ltp;
