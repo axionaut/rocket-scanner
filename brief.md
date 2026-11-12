@@ -1,10 +1,11 @@
-# Active Task: Deployed v1689 / Operational
+# Active Task: Deployed v1690 / Operational
 
-Rocket Scanner v1689 deployed at 2026-11-12 14:05 IST. System operational and in sync with origin/master.
+Rocket Scanner v1690 deployed at 2026-11-12 15:26 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1690:** Purge StratGen engine, unfreeze helper via async daily history and session memoization, fix Markov worker float32 overflow, and align PUOS dual basket export
 - **v1689:** Filter stack Ensemble ranking, PUOS Zombie Capital exemption, and ratchet trailing stop fix
 - **v1688:** Unified Markov-mRMR-Ensemble sequential strategy deployment (Option A)
 - **v1687:** Prioritize deepest loser COMSYN, exclude T1 BTST holdings, ratchet swap GTTs, and enable instant margin updates

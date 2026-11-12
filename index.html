@@ -25,7 +25,6 @@
    <div class="tab" onclick="switchTab(1)">🔬 Methodology <span id="tabCount1" style="font-size:12px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(2)">📈 Performance</div>
    <div class="tab" onclick="switchTab(3)">💰 Finance <span id="tabCount3" style="font-size:12px"></span></div>
-   <div class="tab" onclick="switchTab(4)" style="color:#00e5a3;font-weight:700">⚡ StratGen <span id="tabCount4" style="font-size:11px;padding:2px 6px;border-radius:4px;background:rgba(0,229,163,0.15);color:#00e5a3">Lab</span></div>
   </div>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
   <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top" aria-label="Go to top">▲</button>
@@ -71,7 +70,7 @@
    <div class="ctrls" id="ctrlsPanel">
     <div class="fg" style="flex:1;min-width:150px;max-width:340px"><span class="fg-lbl" style="color:var(--blue)">Search</span><input type="text" id="fSearch" placeholder="Search symbol, company, sector..." style="width:100%;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:14px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()"></div>
     <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Capital ₹</span><input type="number" id="fCapital" placeholder="e.g. 100000" min="0" step="1000" style="width:120px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:14px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="onTradeInputChange()" title="Total capital pool. Empty uses your computed deployed book (shown in the placeholder); type to override."></div>
-    <div class="fg"><span class="fg-lbl" style="color:var(--green)">Active Strategy</span><select id="fModel" onchange="onModelChange()" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:14px;max-width:340px;text-overflow:ellipsis" title="One selected strategy applies to NSE and US using each market data and session."><option value="CUM">Default · CUM - VWAP Trend &amp; Breadth</option><option value="MARKOV_3PCT">Markov · mRMR · Ensemble (Option A)</option><option value="STRATGEN" id="optStratGen">Deployed · loading...</option></select></div>
+    <div class="fg"><span class="fg-lbl" style="color:var(--green)">Active Strategy</span><select id="fModel" onchange="onModelChange()" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:14px;max-width:340px;text-overflow:ellipsis" title="One selected strategy applies to NSE and US using each market data and session."><option value="CUM">Default · CUM - VWAP Trend &amp; Breadth</option><option value="MARKOV_3PCT">Markov · mRMR · Ensemble (Option A)</option></select></div>
     <div class="fg"><span class="fg-lbl" style="color:#818cf8">US Capital $</span><input type="number" id="fUsCapital" placeholder="0" min="0" step="50" style="width:100px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:14px;outline:none" oninput="onUsCapitalChange()" title="Your IBKR Settled Cash (Portfolio, left panel) - not the account total. The app cannot read IBKR, so type it. US GO rows are sized from it: score-weighted, Max % Capital per stock, whole shares, IBKR commission included. Suggest-only: you place the orders."></div>
     <div class="fg"><span class="fg-lbl" style="color:#818cf8">IBKR Plan</span><select id="fUsPlan" onchange="onUsPlanChange()" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:14px" title="Your IBKR pricing plan (Settings > IBKR Pricing Plan). Fixed: $0.005/share, min $1. Tiered: $0.0035/share, min $0.35. Both capped at 1% of the trade. Used for US sizing, net profit and the IBKR ledger."><option value="fixed">Fixed</option><option value="tiered">Tiered</option></select></div>
     <div class="fg"><span class="fg-lbl">Market</span><select id="fMarket" onchange="onMarketViewChange()" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:14px" title="Markets shown. US rows are tinted violet."><option value="all">All</option><option value="nse">NSE</option><option value="us">US</option></select></div>
@@ -101,7 +100,6 @@
  <div class="tp" id="tab1"><div class="meth" id="methContent"></div></div>
  <div class="tp" id="tab2"><div class="meth" id="perfContent"></div></div>
  <div class="tp" id="tab3"><div class="meth" id="finContent"></div></div>
- <div class="tp" id="tab4"><div class="meth" id="stratgenContent"></div></div>
 </div><!-- /dash -->
 </div><!-- /app -->
 
@@ -129,7 +127,7 @@
     script.dataset.cacheKey = cacheKey;
     // The Finance tab loads after app.js; each is independent, so one failing never stops the app.
     script.onload = function() {
-      ['finance.js', 'stratgen-tab.js'].forEach(function (f) {
+      ['finance.js'].forEach(function (f) {
         var s = document.createElement('script'); s.async = false; s.src = f + '?cb=' + cacheKey;
         s.onerror = function () { console.error('Failed to load ' + f); };
         document.head.appendChild(s);

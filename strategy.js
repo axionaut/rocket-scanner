@@ -158,7 +158,7 @@
     return Math.max(economic, reqShares * price);
   }
 
-  // One allocation decision for the live basket, account replay and StratGen.
+  // One allocation decision for the live basket, account replay and strategy tests.
   // Callers provide contemporaneous eligibility/quotes, never a different sizing model.
   function planAccountEntries(candidates, account) {
     const maxStocks=account.maxStocks??20;
@@ -225,6 +225,12 @@
       if (isSwap) throw Error('Cash unavailable: waiting for sacrifice sell fill');
       throw Error(`Cash left fits only ${qty} share(s) (Rs ${Math.round(qty*request.cap)}), below the Rs ${Math.round(minimum)} minimum`);
     }
+    if(isSwap){
+      if(request.fundingPending||!request.fundingSale)throw Error('Cash unavailable: waiting for sacrifice sell fill');
+      const sale=request.fundingSale;
+      const economics=swapEconomics(Number(request.sacrificeAvgCost),sale.price,sale.qty,request.cap,qty,Number(request.swapTargetPct));
+      if(!economics||economics.buyerPotentialGain+1e-9<economics.lossRs)throw Error('Executable swap target gain no longer covers sacrifice loss');
+    }
     return qty;
   }
 
@@ -243,6 +249,29 @@
    * 7. Deficit-aware partial trimming (bounded by loss limit, preserving winners & balance)
    * 8. Sacrifice ranked by lowest lossPct (highest Liberation Efficiency Ratio)
    */
+  function swapSellBasket(sac,now=Date.now()) {
+    const symbol=String(sac?.symbol||sac?.sym||'').toUpperCase();
+    const qty=Number(sac?.sharesToSell),price=Number(sac?.limitPrice||sac?.sellPrice||sac?.ltp);
+    if(!symbol||!Number.isInteger(qty)||qty<1||!(price>0))throw Error('Invalid sacrifice sell basket');
+    return [{id:now,instrument:{tradingsymbol:symbol,symbol,exchange:'NSE',type:'EQ',segment:'NSE',lotSize:1},weight:0,
+      params:{transactionType:'SELL',product:'CNC',orderType:'LIMIT',validity:'DAY',validityTTL:1,
+        quantity:qty,price,triggerPrice:0,disclosedQuantity:0,lastPrice:Number(sac.ltp)||price,variety:'regular',tags:['RS_SWAP']}}];
+  }
+  // One conservative, fee-inclusive economic contract for preview and executable swaps.
+  function swapEconomics(avgCost,sellPrice,sellQty,buyPrice,buyQty,targetPct) {
+    if(![avgCost,sellPrice,sellQty,buyPrice,buyQty,targetPct].every(Number.isFinite)||
+      !(avgCost>0&&sellPrice>0&&sellQty>=1&&buyPrice>0&&buyQty>=1&&targetPct>0))return null;
+    const sellFees=sumChargeParts(calcZerodhaChargesSplit(sellPrice,sellQty,true,false,false));
+    const originalBuyFees=sumChargeParts(calcZerodhaChargesSplit(avgCost,sellQty,false,false,true));
+    const buyFees=sumChargeParts(calcZerodhaChargesSplit(buyPrice,buyQty,false,false,true));
+    const targetPrice=buyPrice*(1+targetPct/100);
+    const targetFees=sumChargeParts(calcZerodhaChargesSplit(targetPrice,buyQty,true,false,false));
+    const lossRs=Math.max(0,(avgCost-sellPrice)*sellQty);
+    const buyerPotentialGain=(targetPrice-buyPrice)*buyQty;
+    return {lossRs,
+      buyerPotentialGain,
+      sellFees,buyFees,targetFees,targetPrice};
+  }
   function evaluateOpportunitySwap(unfundedCandidates, heldPositions, options = {}) {
     if (!Array.isArray(unfundedCandidates) || !unfundedCandidates.length) {
       return { eligible: false, reason: 'No pending buy candidates' };
@@ -261,7 +290,7 @@
     const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 50.0;
     const minLossPct = Number.isFinite(options.minLossPct) ? Number(options.minLossPct) : 0.75;
     // Profit-underwritten budget: loss is strictly bounded by available banked profit from 5-day pool
-    const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : (Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 500);
+    const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : (Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 0);
     const maxLossRs = Number.isFinite(options.maxLossRs) ? Math.max(0, Number(options.maxLossRs)) : profitBudget;
     const targetPct = Number.isFinite(options.targetPct) ? Number(options.targetPct) : 1.25;
     const minDwellMs = Number.isFinite(options.minDwellMs) ? Number(options.minDwellMs) : 3600000;
@@ -343,32 +372,32 @@
       const maxSharesByLoss = isZombie ? settledQty : Math.floor(maxLossRs / lossPerShare);
       if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
 
-      const effectiveUsableLtp = ltp * usableCreditFactor;
+      const sellPrice = typeof options.sellPriceFor==='function' ? Number(options.sellPriceFor(h)) : Number(h.sellPrice||ltp);
+      if(!(sellPrice>0&&sellPrice<=ltp))continue;
+      const effectiveUsableLtp = sellPrice * usableCreditFactor;
       const sharesNeeded = Math.ceil(deficit / effectiveUsableLtp);
       let sharesToSell = Math.min(settledQty, maxSharesByLoss, sharesNeeded);
       if (sharesToSell <= 0) continue;
 
-      let liberatedGross = sharesToSell * ltp;
-      let liberatedUsable = liberatedGross * usableCreditFactor;
-      let totalFunding = availableCash + liberatedUsable;
-
-      // Viability check: total funding must cover at least 1 whole buyer share
-      if (totalFunding < buyerPx) {
-        continue;
+      // Fee-inclusive underwriting is monotonic in sell quantity. Resize the sacrifice
+      // before testing its whole-share replacement; never promise an unfunded ticket.
+      if(!isZombie){
+        let lo=0,hi=sharesToSell;
+        while(lo<hi){const mid=Math.ceil((lo+hi)/2),e=swapEconomics(avgCost,sellPrice,mid,buyerPx,1,targetPct);
+          if(e&&e.lossRs<=maxLossRs+1e-9)lo=mid;else hi=mid-1;}
+        sharesToSell=lo;
       }
-
-      // Profit-Underwritten Loss Check & Asymmetric Expectancy Hurdle:
-      // Non-zombie loss must be fully covered by available banked profit (maxLossRs).
-      // Zombie capital is exempt from positive profitBudget, but strictly subject to the
-      // asymmetric expectancy hurdle: buyer potential gain >= sacrifice loss.
-      const lossRs = Math.max(0, sharesToSell * (avgCost - ltp));
-      const finalBuyerShares = Math.floor(totalFunding / (buyerPx * 1.003));
-      if (finalBuyerShares < 1) continue;
-      if (!isZombie && lossRs > maxLossRs) continue;
-
-      const buyerPotentialGain = finalBuyerShares * buyerPx * (targetPct / 100);
-      if (isZombie && buyerPotentialGain < lossRs) continue;
-
+      if(sharesToSell<1)continue;
+      const liberatedGross=sharesToSell*sellPrice;
+      const liberatedUsable=Math.max(0,liberatedGross*usableCreditFactor-
+        sumChargeParts(calcZerodhaChargesSplit(sellPrice,sharesToSell,true,false,false)));
+      const totalFunding=availableCash+liberatedUsable;
+      const finalBuyerShares=Math.floor(totalFunding/(buyerPx*1.003));
+      if(finalBuyerShares<1||finalBuyerShares*buyerPx+1e-9<minTicket)continue;
+      const economics=swapEconomics(avgCost,sellPrice,sharesToSell,buyerPx,finalBuyerShares,targetPct);
+      if(!economics||(!isZombie&&economics.lossRs>maxLossRs+1e-9)||
+        economics.buyerPotentialGain+1e-9<economics.lossRs)continue;
+      const {lossRs,buyerPotentialGain}=economics;
       const ler = liberatedUsable / (lossRs || 1);
       sacrifices.push({
         symbol: sym,
@@ -380,6 +409,11 @@
         ltp,
         lossPct,
         lossRs,
+        buyerPotentialGain,
+        buyerQty:finalBuyerShares,
+        buyerDebit:finalBuyerShares*buyerPx*1.003,
+        sellPrice,
+        limitPrice:sellPrice,
         isZombie,
         daysHeld: Math.round(daysHeld),
         sessionsHeld,
@@ -418,6 +452,8 @@
       eligible: true,
       buyer,
       sacrifice: chosen,
+      buyerQty:chosen.buyerQty,
+      buyerDebit:chosen.buyerDebit,
       minTicket,
       deficit,
       availableCash,
@@ -465,123 +501,9 @@
    * @param {Object} book - Live order-book data { bids, asks, bidQty, askQty }
    * @returns {Object} Trigger evaluation
    */
-    // Universal metric resolver for ANY strategy generated by StratGen
-  function resolveStockMetric(stock, x, key) {
-    if (!key) return null;
-    const k = String(key).trim().toLowerCase();
-    switch (k) {
-      case 'close': case 'ltp': case 'price': return x.price;
-      case 'open': case 'dayopen': return x.open || x.price;
-      case 'high': case 'dayhigh': return x.high || x.price;
-      case 'low': case 'daylow': return stock.low ?? stock.dayLow ?? x.price;
-      case 'volume': case 'dayvolume': return x.volume;
-      case 'turnover': return x.turnover;
-      case 'rvol': case 'relvol': return x.rvol ?? stock.rvol ?? stock.relAt ?? 1.0;
-      case 'vwap': return x.vwap || x.price;
-      case 'rsi': return stock.rsi !== undefined ? Number(stock.rsi) : (stock.rsi14 !== undefined ? Number(stock.rsi14) : null);
-      case 'macd': return stock.macd !== undefined ? Number(stock.macd) : null;
-      case 'macd_sig': case 'macd_signal': return stock.macd_sig !== undefined ? Number(stock.macd_sig) : (stock.macdSig !== undefined ? Number(stock.macdSig) : null);
-      case 'macd_hist': return stock.macd_hist !== undefined ? Number(stock.macd_hist) : (stock.macdHist !== undefined ? Number(stock.macdHist) : null);
-      case 'stoch_k': return stock.stoch_k !== undefined ? Number(stock.stoch_k) : (stock.stochK !== undefined ? Number(stock.stochK) : null);
-      case 'stoch_d': return stock.stoch_d !== undefined ? Number(stock.stoch_d) : (stock.stochD !== undefined ? Number(stock.stochD) : null);
-      case 'ema9': return stock.ema9 !== undefined ? Number(stock.ema9) : null;
-      case 'ema20': return stock.ema20 !== undefined ? Number(stock.ema20) : null;
-      case 'ema50': return stock.ema50 !== undefined ? Number(stock.ema50) : null;
-      case 'ema200': return stock.ema200 !== undefined ? Number(stock.ema200) : null;
-      case 'ema50_1d': return stock.ema50_1d !== undefined ? Number(stock.ema50_1d) : (stock.ema50 !== undefined ? Number(stock.ema50) : null);
-      case 'ema200_1d': return stock.ema200_1d !== undefined ? Number(stock.ema200_1d) : (stock.ema200 !== undefined ? Number(stock.ema200) : null);
-      case 'aroon_up_1d': return stock.aroon_up_1d !== undefined ? Number(stock.aroon_up_1d) : (stock.aroonUp !== undefined ? Number(stock.aroonUp) : null);
-      case 'pivot_p': return stock.pivot_p !== undefined ? Number(stock.pivot_p) : (stock.pp !== undefined ? Number(stock.pp) : null);
-      case 'pivot_r1': return stock.pivot_r1 !== undefined ? Number(stock.pivot_r1) : (stock.r1 !== undefined ? Number(stock.r1) : null);
-      case 'pivot_r2': return stock.pivot_r2 !== undefined ? Number(stock.pivot_r2) : (stock.r2 !== undefined ? Number(stock.r2) : null);
-      case 'pivot_s1': return stock.pivot_s1 !== undefined ? Number(stock.pivot_s1) : (stock.s1 !== undefined ? Number(stock.s1) : null);
-      case 'keltner_lower': return stock.keltner_lower !== undefined ? Number(stock.keltner_lower) : null;
-      case 'keltner_upper': return stock.keltner_upper !== undefined ? Number(stock.keltner_upper) : null;
-      case 'donchian_lower': return stock.donchian_lower !== undefined ? Number(stock.donchian_lower) : null;
-      case 'donchian_upper': return stock.donchian_upper !== undefined ? Number(stock.donchian_upper) : null;
-      case 'bb_lower': return stock.bb_lower !== undefined ? Number(stock.bb_lower) : null;
-      case 'bb_upper': return stock.bb_upper !== undefined ? Number(stock.bb_upper) : null;
-      default:
-        if (k.startsWith('pattern_')) {
-          const pat = k.replace('pattern_', '').replace(/_/g, ' ');
-          if (stock[k] !== undefined) return stock[k] ? 1 : 0;
-          if (stock.pattern) return String(stock.pattern).toLowerCase().includes(pat) ? 1 : 0;
-          if (Array.isArray(stock.patterns)) return stock.patterns.some(p => String(p).toLowerCase().includes(pat)) ? 1 : 0;
-          return 0;
-        }
-        if (stock[key] !== undefined && Number.isFinite(Number(stock[key]))) return Number(stock[key]);
-        return null;
-    }
-  }
-
-  function evaluateCondition(lVal, op, rVal) {
-    if (lVal === null || lVal === undefined || rVal === null || rVal === undefined) return false;
-    if (isNaN(lVal) || isNaN(rVal)) return false;
-    switch (op) {
-      case '>': return lVal > rVal;
-      case '<': return lVal < rVal;
-      case '>=': return lVal >= rVal;
-      case '<=': return lVal <= rVal;
-      case '==': return lVal == rVal;
-      case '!=': return lVal != rVal;
-      default: return false;
-    }
-  }
-
   function evaluateTrigger(stock, book = null) {
     const x=inputs(stock),ltp=x.price,dayHigh=x.high,upperCircuit=x.upperCircuit;
     if(!(ltp>0))return {canBuy:false,reason:'Invalid price'};
-
-    // Dynamic StratGen Strategy Execution (Universal Binary Pass/Fail for ANY strategy)
-    const dep = CONFIG.ACTIVE_STRATGEN_DEPLOYED;
-    if(dep && (dep.live_capability_version !== 'rs-stratgen-live-1' || !(dep.program_schema==='rs-strategy-program-1'&&dep.program_validation?.contract_hash===dep.sha256)&&dep.test_evidence?.live_parity !== true)){
-      return {canBuy:false,reason:'Strategy program has not been compiled by the shared engine'};
-    }
-    if(dep?.live_capability_version==='rs-stratgen-live-1'){
-      const signal=stock.stratgenSignal;
-      if(!signal||signal.contractHash!==dep.sha256||!Number.isFinite(signal.computedAt)||signal.computedAt>Date.now()+1000||Date.now()-signal.computedAt>signalTtlMs(dep))return {canBuy:false,reason:'Awaiting fresh shared-engine contract evaluation'};
-      if(!signal.eligible)return {canBuy:false,reason:signal.reason||'Shared strategy conditions are not satisfied'};
-      return {canBuy:true,symbol:stock.symbol,limitPrice:ltp,targetPrice:null,stopPrice:null,targetPct:0,stopLossPct:0,reason:'Tested entry contract satisfied; shared RS trailing exit; no minimum holding period; no maximum'};
-    }
-    if(dep && dep.spec && Array.isArray(dep.spec.entry_rules) && dep.spec.entry_rules.length > 0){
-      const universe=evaluateUniverse(stock);
-      if(!universe.eligible)return {canBuy:false,reason:universe.reason};
-      const rules = dep.spec.entry_rules;
-      for(const rule of rules){
-        const ind = (rule.indicator || '').toLowerCase();
-        const op = rule.op || '>';
-        const lVal = resolveStockMetric(stock, x, ind);
-
-        let rVal = null;
-        if(rule.value !== undefined && rule.value !== null){
-          rVal = Number(rule.value);
-        } else if(rule.ref){
-          rVal = resolveStockMetric(stock, x, rule.ref.toLowerCase());
-        }
-
-        if(!evaluateCondition(lVal, op, rVal)){
-          const lStr = lVal !== null ? (Number.isFinite(lVal) ? lVal.toFixed(2) : lVal) : 'N/A';
-          const rStr = rVal !== null ? (Number.isFinite(rVal) ? rVal.toFixed(2) : rVal) : (rule.ref || 'target');
-          return {
-            canBuy: false,
-            reason: `Pending rule: ${rule.indicator} (${lStr}) ${op} ${rule.ref || rule.value} (${rStr})`
-          };
-        }
-      }
-
-      const targetPrice = +(ltp * (1 + CONFIG.TARGET_PCT / 100)).toFixed(2);
-      const stopPrice = CONFIG.STOP_LOSS_PCT > 0 ? +(ltp * (1 - CONFIG.STOP_LOSS_PCT / 100)).toFixed(2) : null;
-      return {
-        canBuy: true,
-        symbol: stock.symbol,
-        limitPrice: ltp,
-        targetPrice,
-        stopPrice,
-        targetPct: CONFIG.TARGET_PCT,
-        stopLossPct: CONFIG.STOP_LOSS_PCT,
-        reason: `All strategy rules satisfied (${dep.name || 'StratGen Alpha'})`
-      };
-    }
 
     if(!(dayHigh>0)||dayHigh<ltp)return {canBuy:false,reason:'Missing or inconsistent day high'};
     const distToHighPct=(dayHigh-ltp)/ltp*100;
@@ -1003,45 +925,24 @@ function bookedSession(session,holdingCosts,tradebook){
     return model==='CUM'&&Number.isFinite(score)&&Number.isFinite(floor)&&score>=floor+CUM_ENTRY_BAND;
   }
 
-  // v1635: a StratGen signal is produced at a completed bar and is valid until the
-  // next bar of its own timeframe closes (90 s remains the floor for 1-minute work).
-  function timeframeMinutesOf(dep){
-    const match=/(\d+)\s*(minute|min|hour|hr)/i.exec(String(dep?.spec?.timeframe||dep?.timeframe||''));
-    if(!match)return 5;
-    const n=parseInt(match[1],10);
-    return Math.max(1,Math.min(375,/^h/i.test(match[2])?n*60:n));
-  }
-  function signalTtlMs(dep){return Math.max(90000,timeframeMinutesOf(dep)*60000+30000);}
-
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
   function entryGateApplies(){
     return false;
   }
 
-  function applyDeployedStrategy(dep) {
-    CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;CONFIG.ACTIVE_STRATGEN_DEPLOYED=null;
-    if(!dep)return;
-    if(dep==='MARKOV_3PCT'||dep.isMarkov||dep.strategy_id==='markov_multihorizon_3pct'){
-      CONFIG.TARGET_PCT=1.25;
-      CONFIG.STOP_LOSS_PCT=0;
-      CONFIG.MAX_HOLDING_DAYS=null;
-      CONFIG.ACTIVE_STRATGEN_DEPLOYED=null;
-      return;
-    }
-    // Proposal TP/SL/horizons must never silently rewrite the common executor.
-    if(dep.spec?.exit?.policy!=='rs-trail-min5-v2'||!(dep.program_schema==='rs-strategy-program-1'&&dep.program_validation?.contract_hash===dep.sha256)&&dep.test_evidence?.live_parity!==true)return;
-    CONFIG.TARGET_PCT=0;CONFIG.ACTIVE_STRATGEN_DEPLOYED=dep;
+  function applySelectedModel(model) {
+    const selected=String(model||'CUM').toUpperCase();
+    if(!['CUM','MARKOV_3PCT','ENS','PATH'].includes(selected))throw Error('Unknown selected model');
+    CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;
   }
 
   return {
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
-    applyDeployedStrategy,
+    applySelectedModel,
     entryScoreCapped,
     CUM_ENTRY_BAND,
     CUM_REFINEMENT,
     cumRefinementReason,
-    timeframeMinutesOf,
-    signalTtlMs,
     entryGateApplies,
     weightedPosition,
     exitBuyWindows,
@@ -1057,6 +958,8 @@ function bookedSession(session,holdingCosts,tradebook){
     ibkrOrderFee,
     authorizeAccountEntry,
     evaluateOpportunitySwap,
+    swapEconomics,
+    swapSellBasket,
     CONFIG,
     inputs,
     evaluateUniverse,

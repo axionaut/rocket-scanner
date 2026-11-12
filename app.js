@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-12 14:05 IST'; // release build date (IST)
-const APP_VERSION=1689;
+const BUILD_TS='2026-11-12 15:26 IST'; // release build date (IST)
+const APP_VERSION=1690;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='STRATGEN'?'StratGen Alpha':v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
@@ -3743,7 +3743,7 @@ function modelBadgeHtml(model,note=''){
 }
 function enabledModelsLabel(){
   const m = selectedBtstModel();
-  return m === 'STRATGEN' ? 'StratGen Alpha' : (m === 'CUM' ? 'Cumulative Change' : (m === 'PATH' ? 'PATH' : 'Ensemble engine'));
+  return m==='MARKOV_3PCT'?'Markov / mRMR / Ensemble':(m==='CUM'?'Cumulative Change':m);
 }
 function dualScoreCell(row){
   const act = getRowActionState(row);
@@ -4454,18 +4454,18 @@ let _floorPushTimer=null,_floorPushed=null;
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
 function isRankedModel(m){ return false; }   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
 function floorModel(){ return selectedBtstModel(); }
-function scoreFloorStore(model=floorModel()){return model==='STRATGEN'?'rs_stratgen_score_floor':(model==='CUM'?'rs_cumulative_score_floor':model==='MARKOV_3PCT'?'rs_markov_score_floor':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE);}
+function scoreFloorStore(model=floorModel()){return model==='CUM'?'rs_cumulative_score_floor':model==='MARKOV_3PCT'?'rs_markov_ensemble_score_floor_v1':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
-    el.value=stored===null?(model==='MARKOV_3PCT'?'60':ranked?'2.1':''):stored;
-    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'60':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step=model==='MARKOV_3PCT'?'1':'0.1';
+    el.value=stored===null?(model==='MARKOV_3PCT'?'1.6':ranked?'2.1':''):stored;
+    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'1.6':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
     el.style.width=model==='CUM'?'140px':model==='MARKOV_3PCT'?'110px':'90px';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='STRATGEN'?'StratGen Floor':(model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Markov · ENS Floor (%)':(model==='ENS'?'Ensemble':model)+' Floor');
-    el.title=model==='MARKOV_3PCT'?'Markov multi-horizon bounce probability floor (40% to 100%). Default 60% filters for Tier 1 high-probability alpha stocks. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Ensemble Floor':(model==='ENS'?'Ensemble':model)+' Floor';
+    el.title=model==='MARKOV_3PCT'?'Ensemble committee score after the Markov and mRMR filters. Default 1.6; saturation cap 2.15. This rank score is not a win probability. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4577,7 +4577,7 @@ async function loadBtstPicks(){
       if(!picks||String(picks.asOf)<=String(BTST.rank.asOf))picks=BTST.rank;
     }
     const target=tm||BTST.targetModel;
-    const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session,picks?.activeModel,picks?.rules?.minScore,picks?.modelSelectedAt].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session,rank?.activeModel,rank?.rules?.minScore,rank?.modelSelectedAt].join('|');
+    const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session,picks?.activeModel,picks?.rules?.minScore,picks?.modelSelectedAt,picks?.ensemblePipeline?.asOf,picks?.ensemblePipeline?.state,picks?.ensemblePipeline?.reason].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session,rank?.activeModel,rank?.rules?.minScore,rank?.modelSelectedAt,rank?.ensemblePipeline?.asOf,rank?.ensemblePipeline?.state,rank?.ensemblePipeline?.reason].join('|');
     const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length,ENTRY_TRIGGERS?.at].join('|');
     BTST.loadedAt=Date.now();
     if(rankKey!==BTST.rankKey||SCORE_HIGHS?.day!==today) loadScoreHighs(today);
@@ -4851,7 +4851,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov · mRMR · Ensemble',STRATGEN:'StratGen Alpha',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov · mRMR · Ensemble',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4861,7 +4861,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['CUM','MARKOV_3PCT','STRATGEN'];
+const SELECTABLE_MODELS=['CUM','MARKOV_3PCT'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4873,36 +4873,28 @@ let _modelChoiceEpoch=0;
 let _modelSwitchPending=false;
 let _strategySyncPending=null;
 let _strategySyncSignature=null;
-function syncStratGenDeployedState(){
+function syncSelectedModelFromHelper(){
   if(_modelSwitchPending)return Promise.resolve();
   if(_strategySyncPending)return _strategySyncPending;
   const epoch=_modelChoiceEpoch;
-  _strategySyncPending=readHelperResponse('/api/stratgen/deployed',{timeout:4000}).then(result=>{
+  _strategySyncPending=readHelperResponse('/api/btst/model',{timeout:4000}).then(result=>{
     if(epoch!==_modelChoiceEpoch||_modelSwitchPending)return;
-    if(result?.ok!==true)throw Error('Local deployment authority unavailable');
-    const model=String(result.selectedModel||'').toUpperCase();
-    if(!SELECTABLE_MODELS.includes(model))throw Error('Selected strategy unavailable');
-    const d=result.deployed||null;
-    const signature=JSON.stringify([model,d]);
+    const model=String(result?.model||'').toUpperCase();
+    if(result?.ok===false||!SELECTABLE_MODELS.includes(model))throw Error('Selected strategy unavailable');
     const el=document.getElementById('fModel');
-    if(signature===_strategySyncSignature&&(!el||el.value===model))return;
+    if(model===_strategySyncSignature&&(!el||el.value===model))return;
     const changedModel=!!el&&el.value!==model;
-    const opt=document.getElementById('optStratGen');
-    if(opt){opt.textContent=d?.name?'Deployed \u00b7 '+d.name:'Deployed \u00b7 none installed';opt.disabled=!d?.name;}
-    window.__deployedStratGen=d;
     if(el)el.value=model;
     rememberModelChoice(model);
-    if(typeof RocketStrategy!=='undefined')RocketStrategy.applyDeployedStrategy(model==='STRATGEN'?d:(model==='MARKOV_3PCT'?'MARKOV_3PCT':null));
+    RocketStrategy?.applySelectedModel(model);
     const brandTag=document.querySelector('.brand-tag');
-    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov \u00b7 mRMR \u00b7 Ensemble (Option A)':model==='CUM'?'CUM - VWAP Trend & Breadth':(d?.name||'StratGen Alpha Engine');
+    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':'CUM - VWAP Trend & Breadth';
     if(changedModel)initScoreFloorUI(true);
     refreshBtstModelView();
-    _strategySyncSignature=signature;
+    _strategySyncSignature=model;
   }).catch(()=>{}).finally(()=>{_strategySyncPending=null;});
   return _strategySyncPending;
 }
-// One authoritative response carries both selection and installed strategy.
-function syncSelectedModelFromHelper(){return syncStratGenDeployedState();}
 function initModelUI(){
 
   try{
@@ -4911,10 +4903,10 @@ function initModelUI(){
     const el=document.getElementById('fModel');
     if(el) el.value=savedModelChoice()||'CUM';
     initScoreFloorUI(true);   // the floor box follows the model just restored
-    syncStratGenDeployedState();
-    if (!window._stratgenPollActive) {
-      window._stratgenPollActive = true;
-      setInterval(syncStratGenDeployedState, 5000);
+    syncSelectedModelFromHelper();
+    if (!window._selectedModelPollActive) {
+      window._selectedModelPollActive = true;
+      setInterval(syncSelectedModelFromHelper, 5000);
     }
     const epoch=_modelChoiceEpoch;
     readHelperResponse('/api/btst/model',{timeout:6000}).then(d=>{
@@ -4932,7 +4924,7 @@ function onModelChange(){
   return readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(data=>{
     if(!data||data.ok===false||data.model!==m)throw Error(data?.error||data?.why||'Strategy selection was not confirmed');
     rememberModelChoice(m);el.value=m;
-    RocketStrategy?.applyDeployedStrategy(m==='STRATGEN'?window.__deployedStratGen:(m==='MARKOV_3PCT'?'MARKOV_3PCT':null));
+    RocketStrategy?.applySelectedModel(m);
     initScoreFloorUI(true);refreshBtstModelView();
     if(ALL.length)applyFilters({preservePage:true});
   }).catch(error=>{el.value=previous;rememberModelChoice(previous);alert('Strategy switch failed: '+error.message);})
@@ -4975,11 +4967,10 @@ function btstEngineMinScore(){
 }
 // What the screen judges against: the override when typed, otherwise the engine's own floor.
 function btstMinScore(){
-  if(floorModel()==='STRATGEN')return window.__deployedStratGen?.spec?.common_policy?.version?.startsWith('native-cum-')?0:1;
   if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
   if(floorModel()==='MARKOV_3PCT'){
     const o=btstFloorOverride();
-    return o!==null?o:(btstEngineMinScore()??60);
+    return o!==null?o:(btstEngineMinScore()??1.6);
   }
   const r=btstRanking();
   if(r&&r.model!==floorModel())return r.minScore;
@@ -5323,6 +5314,12 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(floorModel()==='MARKOV_3PCT'){
     const source=BTST.data;
     if(source?.activeModel!=='MARKOV_3PCT')return {state:'WAIT',reason:'Awaiting Markov 3% strategy observations'};
+    const pipeline=source.ensemblePipeline,now=Date.now(),scoredAt=Date.parse(pipeline?.asOf);
+    if(source.ok!==true||source.session!==getSessionDate()||pipeline?.ok!==true||!Number.isFinite(scoredAt)||now<scoredAt||now-scoredAt>180000){
+      return {state:'WAIT',reason:pipeline?.reason||'Awaiting fresh Markov / mRMR / Ensemble scores'};
+    }
+    const liveQuote=_universeMap.get(s.symbol),liveAt=Number(liveQuote?.priceAt);
+    if(!Number.isFinite(liveAt)||liveAt<=0||now<liveAt||now-liveAt>45000)return {state:'WAIT',reason:'Awaiting a fresh stock quote for the Ensemble setup'};
     const held=getCombinedOpenPositionMap()[s.symbol];
     if(held?.qty>0)return {state:'WAIT',reason:'Markov swing position already active'};
     const sym=normSym(s.symbol);
@@ -5336,7 +5333,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     
     if(!Number.isFinite(score)||score<floor){
       const ensLabel = ensScore != null ? ` (Ensemble ${ensScore >= 0 ? '+' : ''}${ensScore.toFixed(2)})` : '';
-      return {state:'WAIT',reason:`Ensemble-driven score ${score!=null?score.toFixed(1)+'%':'N/A'}${ensLabel} is below ${floor}% probability floor`};
+      return {state:'WAIT',reason:`Ensemble-driven score ${score!=null?score.toFixed(2):'N/A'}${ensLabel} is below the ${floor} Ensemble floor`};
     }
     if(!pick){
       return {state:'WAIT',reason:`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`};
@@ -5367,7 +5364,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
         reason: `Anti-Chase: ${s.symbol} extended too far (+${vwapDiff ? vwapDiff + '% vs VWAP' : ''}${vwapDiff && openDiff ? ', ' : ''}${openDiff ? '+' + openDiff + '% vs Open' : ''}). Awaiting pullback to VWAP.`
       };
     }
-    const isLiveTriggered = Boolean(pick.triggered || (pick.isArmed && !pick.ensemble?.saturated && dayOpen > 0 && price >= dayOpen));
+    const isLiveTriggered = Boolean(pick.triggered && pick.isArmed && !pick.ensemble?.saturated && dayOpen > 0 && price >= dayOpen);
 
     if(isLiveTriggered){
       noteCrossing(s.symbol, price, floor);
@@ -5396,37 +5393,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
         :`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`
     };
   }
-  if((getCombinedOpenPositionMap()[s.symbol]?.qty||0)>0)return {state:'WAIT',reason:'Strategy already has an open position'};
-  const price=Number(s.price);
-  if(!(price>0))return {state:'BLOCKED',reason:'Invalid or missing live price'};
-  const installed=window.__deployedStratGen||RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED;
-  if(!installed?.spec?.common_policy?.version?.startsWith('native-cum-')){const common=RocketStrategy.evaluateUniverse(s);if(!common.eligible)return {state:'WAIT',reason:common.reason};}
-
-  // 2. Active Strategy Evaluation (Dynamic from StratGen)
-  const activeStrat = window.__deployedStratGen || RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED;
-  if(!activeStrat){
-    return {state:'WAIT', reason:'No active strategy deployed in StratGen'};
-  }
-
-  // 3. Evaluate Strategy Trigger Rules
-  const certified={...s,stratgenSignal:BTST.data?.stratgen?.signals?.[normSym(s.symbol)]};
-  const trig = RocketStrategy.evaluateTrigger(certified, BOOK_LADDER?.[normSym(s.symbol)] || null);
-  if(trig && trig.canBuy){
-    noteCrossing(s.symbol, trig.limitPrice || price, 0);
-    return {
-      state: 'GO',
-      reason: trig.reason || 'Active strategy entry conditions satisfied',
-      targetPrice: trig.targetPrice,
-      stopPrice: trig.stopPrice,
-      targetPct: trig.targetPct,
-      stopLossPct: trig.stopLossPct
-    };
-  }
-
-  return {
-    state: 'WAIT',
-    reason: trig?.reason || 'Strategy entry conditions pending'
-  };
+  return {state:'WAIT',reason:'Select a supported native strategy'};
 }
 // v1407: A STOCK FROZEN AT ITS UPPER CIRCUIT CANNOT BE BOUGHT AT ALL. 21 Sep FEDDERSHOL ranked
 // #1 (+2.13) and PROTEAN #2 while both sat locked at +20%: Kite showed 75,34,463 shares bid and
@@ -5570,7 +5537,8 @@ function getOpportunitySwapForCandidate(s){
       ltp,
       open,
       vwap,
-      firstAt: plk?.firstAt || 0,
+      firstAt: plk?.firstAt || plk?.buyAt || 0,
+      firstSeenDay: plk?.firstSeenDay,
       dayChg
     };
   });
@@ -5583,7 +5551,7 @@ function getOpportunitySwapForCandidate(s){
   const score = Number(s.score || s.stratScore || btstScoreOf(s.symbol) || 1.0);
   const quote = _universeMap.get(s.symbol);
   const vwap = Number(quote?.vwap || s.vwap || px);
-  const minCap = Math.max(RocketStrategy.CONFIG?.MIN_ALLOCATION_RS || 2969, px);
+  const minCap = Math.max(Number(RocketStrategy.CONFIG?.MIN_ALLOCATION_RS) || 0, px);
   const candidate = {
     symbol: s.symbol,
     price: px,
@@ -5597,7 +5565,7 @@ function getOpportunitySwapForCandidate(s){
   const breadth = (breadthObj?.pct != null) ? (breadthObj.pct / 100) : (breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50);
   const availableCash = (typeof getKiteAvailableCash==='function' && getKiteAvailableCash() != null) ? getKiteAvailableCash() : 0;
   const circuitBroken = Boolean(PROFIT_LOCK_STATUS?.opportunitySwap?.circuitBroken);
-  const profitBudget = PROFIT_LOCK_STATUS?.lossBudget?.available != null ? PROFIT_LOCK_STATUS.lossBudget.available : null;
+  const profitBudget = Number.isFinite(PROFIT_LOCK_STATUS?.lossBudget?.available) ? PROFIT_LOCK_STATUS.lossBudget.available : 0;
   const targetPct = 1.25 + (Number(typeof executionControls !== 'undefined' ? executionControls?.targetExtraPct : document.getElementById('fTargetExtra')?.value) || 0);
 
   const res = RocketStrategy.evaluateOpportunitySwap([candidate], heldList, {
@@ -10508,7 +10476,7 @@ function _renderMethodologyInner(){
     <p>The selected model (Ensemble, PATH or Cumulative Change) supplies the recommendation table, counts, allocation and basket. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings.</p></div>
-    <div class="m-card"><h4>CUM - VWAP Trend &amp; Breadth</h4><p>Native ten-second VWAP-gap zero crossing and original positive score below +0.5. A native two-rise trigger is consumed when it fires; only a second rise greater than three times the first passes. Price must be above session VWAP and the 09:15-09:29 opening high after 09:30. The frozen March-selected 200-stock sample needs at least 100 fresh quotes and 50% above their opens. Previous completed stock close must exceed EMA20 &gt; EMA50, and at least 60% of sample prior closes must exceed EMA20. Missing context waits. Shared score allocation, held-add/rebuy rules, fees, liquidity and trailing exits apply, with no minimum or maximum hold. StratGen rankings show the completed one-minute modeled replay, its dates and real equity snapshot; it is not exact tick or broker performance.</p></div>
+    <div class="m-card"><h4>CUM - VWAP Trend &amp; Breadth</h4><p>Native ten-second VWAP-gap zero crossing and original positive score below +0.5. A native two-rise trigger is consumed when it fires; only a second rise greater than three times the first passes. Price must be above session VWAP and the 09:15-09:29 opening high after 09:30. The frozen March-selected 200-stock sample needs at least 100 fresh quotes and 50% above their opens. Previous completed stock close must exceed EMA20 &gt; EMA50, and at least 60% of sample prior closes must exceed EMA20. Missing context waits. Shared score allocation, held-add/rebuy rules, fees, liquidity and trailing exits apply, with no minimum or maximum hold. Account replay shows modeled trades using the recorded account snapshot; it is not exact tick or broker performance.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (a new position needs at least ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')}, so the ₹15.34 DP fee is at most 0.26% of it; adds need one share; when cash is short the higher score, then the earlier trigger, then the more liquid stock is funded first). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. Price freshness, circuit, surveillance and EQ checks still apply. Market trend does not block entries.</p></div>
@@ -11453,7 +11421,8 @@ function _planDualBasketUncached(rows,capital){
           ltp,
           open,
           vwap,
-          firstAt: plk?.firstAt || 0,
+          firstAt: plk?.firstAt || plk?.buyAt || 0,
+      firstSeenDay: plk?.firstSeenDay,
           dayChg
         };
       });
@@ -11461,7 +11430,7 @@ function _planDualBasketUncached(rows,capital){
       const breadth = (breadthObj?.pct != null) ? (breadthObj.pct / 100) : (breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50);
       const availableCash = (typeof getKiteAvailableCash === 'function' && getKiteAvailableCash() != null) ? getKiteAvailableCash() : 0;
       const circuitBroken = Boolean(PROFIT_LOCK_STATUS?.opportunitySwap?.circuitBroken);
-      const profitBudget = PROFIT_LOCK_STATUS?.lossBudget?.available != null ? PROFIT_LOCK_STATUS.lossBudget.available : null;
+      const profitBudget = Number.isFinite(PROFIT_LOCK_STATUS?.lossBudget?.available) ? PROFIT_LOCK_STATUS.lossBudget.available : 0;
       const targetPct = 1.25 + (Number(typeof executionControls !== 'undefined' ? executionControls?.targetExtraPct : document.getElementById('fTargetExtra')?.value) || 0);
 
       const swapEval = RocketStrategy.evaluateOpportunitySwap(unfundedCandidates, heldList, {
@@ -11473,19 +11442,18 @@ function _planDualBasketUncached(rows,capital){
         now: Date.now()
       });
 
-      if (swapEval && swapEval.eligible && swapEval.buyer && swapEval.sacrifice) {
+      if (swapEval && swapEval.eligible && swapEval.buyer && swapEval.sacrifice && Number.isSafeInteger(swapEval.buyerQty) && swapEval.buyerQty > 0 && Number.isFinite(swapEval.buyerDebit) && swapEval.buyerDebit > 0) {
         const buyer = swapEval.buyer;
         const sac = swapEval.sacrifice;
-        const totalUsable = (sac.liberatedUsable || (sac.liberatedGross * 0.80)) + Math.max(0, availableCash);
-        const per = buyer.price * 1.003;
-        const swapQty = Math.max(1, Math.floor(totalUsable / per));
+        const swapQty = Number(swapEval.buyerQty);
+        const swapDebit = Number(swapEval.buyerDebit);
         const swapCap = swapQty * buyer.price;
         planned.funded.push(buyer.symbol);
         planned.alloc[buyer.symbol] = {
           qty: swapQty,
           capital: swapCap,
           alloc: swapCap,
-          debit: swapCap * 1.003,
+          debit: swapDebit,
           isOpportunitySwap: true,
           sacrifice: sac,
           score: buyer.score,
@@ -11825,7 +11793,8 @@ function onMarketViewChange(){
 function usFeedLive(){
   const d=US_FEED.data;
   const now=Date.now(),age=now-Date.parse(d?.asOf),close=Date.parse(d?.closesAt);
-  const live = !!(d&&d.ok&&d.live&&!US_FEED.err&&age>=0&&age<10*60000&&(!Number.isFinite(close)||now<close));
+  const selected=typeof floorModel==='function'?floorModel():'CUM';
+  const live = !!(d&&d.ok&&d.model===selected&&d.live&&!US_FEED.err&&age>=0&&age<10*60000&&(!Number.isFinite(close)||now<close));
   if(typeof RocketStrategy!=='undefined'&&live)RocketStrategy.setMarketLiveOverride('us',true,'us_feed_live',now);
   return live;
 }
@@ -11890,7 +11859,7 @@ let _usPlanMemo=null;
 function usPlan(){
   const d=US_FEED.data,cap=usCapital(),fl=usFloor(),pct=typeof getMaxAllocPct==='function'?getMaxAllocPct():100,live=usFeedLive();
   const ibkr=usIbkrPlan();
-  const isTrailing=d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','STRATGEN'].includes(d?.model)||(typeof floorModel==='function'&&['CUM','STRATGEN'].includes(floorModel()));
+  const isTrailing=d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT'].includes(d?.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT'].includes(floorModel()));
   const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
   const trailGap=(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.dynamicTrailGapPct==='function')
     ?RocketStrategy.dynamicTrailGapPct(mlot)
@@ -12116,7 +12085,7 @@ function usRows(){
   if(!d||!d.ok) return [];
   const fl=usFloor(),live=usFeedLive();
   const q=(document.getElementById('fSearch')?.value||'').trim().toUpperCase();
-  const isTrailing=d.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','STRATGEN'].includes(d.model)||(typeof floorModel==='function'&&['CUM','STRATGEN'].includes(floorModel()));
+  const isTrailing=d.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT'].includes(d.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT'].includes(floorModel()));
   const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
   const trailGap=(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.dynamicTrailGapPct==='function')
     ?RocketStrategy.dynamicTrailGapPct(mlot)
@@ -12148,17 +12117,17 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = floorModel()==='CUM'?{name:'CUM - VWAP Trend & Breadth',archetype:'VWAP acceleration 3x + trend + breadth',spec:{exit:{policy:'rs-trail-min5-v2'}}}:window.__deployedStratGen || (typeof RocketStrategy !== 'undefined' ? RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED : null);
+  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
   if(m.nse){
     const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
     add(0,'NSE',ALL.length?(100*bull/ALL.length).toFixed(0)+'% advancing':'Unavailable',`${bull} up / ${ALL.length-bull} not up · ${isEquitySession(Date.now())?'session open':'closed'}`);
-    const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'StratGen Alpha';
-    add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'} · Binary Pass/Fail` : 'Awaiting strategy deployment');
+    const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'Native strategy';
+    add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'}${floorModel()==='CUM'?' · Binary Pass/Fail':''}` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,'Binary trigger rules satisfied');
+    add(2,'NSE',`${go} GO`,floorModel()==='CUM'?'Binary trigger rules satisfied':'Markov and mRMR filters plus Ensemble floor');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
     if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','No minimum hold; no maximum');
@@ -12172,7 +12141,7 @@ function dashboardMarketCards(){
     add(1,'US',escHtml(stratName),`${d?.ok?d.universe??d.ranking?.length??0:0} scored · ${d?.ranking?.length??0} rows published`);
     const go=d?.ok&&usFeedLive()?(d.ranking||[]).filter(r=>typeof r.eligible==='boolean'?r.eligible:(Number.isFinite(Number(r.score))&&Number(r.score)>=usFloor())).length:0;
     add(2,'US',`${go} GO`,'Suggestions · manual IBKR trades');
-    if(d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','STRATGEN'].includes(d?.model))add(3,'US','RS trailing exit','No minimum hold; no maximum');
+    if(d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT'].includes(d?.model))add(3,'US','RS trailing exit','No minimum hold; no maximum');
     else add(3,'US',signed(Number(d?.rules?.targetPct)||3),'Suggested target · no automated protection');
   }
   return groups.map((rows,i)=>`<div class="st"><div class="st-l">${['Market context','Active Strategy','Qualification','Targets'][i]}</div><div style="font-size:15px;line-height:1.7">${rows.join('')}</div></div>`).join('');
@@ -12217,7 +12186,7 @@ async function loadUsFeed(){
   if(brokerPanel&&!brokerPanel.contains(document.activeElement))brokerPanel.innerHTML=buildUsPositionsPanel();
   try{
     const model=typeof floorModel==='function'?floorModel():'CUM';
-    const useUnified=(model==='CUM'||model==='STRATGEN');
+    const useUnified=(model==='CUM'||model==='MARKOV_3PCT');
     let d=null;
     if(useUnified){
       try{
@@ -12226,8 +12195,8 @@ async function loadUsFeed(){
         d=null;
       }
     }
-    if(!d||d.ok===false){
-      d=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent('intl_US.json'),{timeout:6000});
+    if(!d||d.model!==model){
+      d={ok:false,model,live:false,ranking:[],reason:'Selected strategy observations are unavailable for the US market'};
     }
     US_FEED.data=d;US_FEED.at=Date.now();US_FEED.err=null;
     const usEl=document.getElementById('rankUsPositions');
@@ -14464,6 +14433,13 @@ function renderStatusBar(){
   if(m.us)bits.push(`US ${us.length}/${US_FEED.data?.ranking?.length??0} published rows`,
     `<span style="color:#818cf8">US ${ugo} GO · ${us.length-ugo} WAIT</span>`,`US ${escHtml(usMarketStatus())} · suggest-only`);
   if(m.nse){
+  if(floorModel()==='MARKOV_3PCT'){
+    const p=BTST.data?.ensemblePipeline||BTST.rank?.ensemblePipeline;
+    const age=Date.now()-Date.parse(p?.asOf);
+    const ready=p?.ok===true&&age>=0&&age<=180000;
+    const labels={starting:'Starting',history:'Loading history',features:'Building indicators',mrmr:'Learning market regimes',training:'Training Ensemble',scoring:'Scoring candidates',ready:'Scores ready',error:'Scores unavailable',stale:'Refreshing scores'};
+    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(p?.reason||'Waiting for current market scores')}">Ensemble: ${escHtml(ready?'Scores ready':labels[p?.state]||'Waiting for scores')}</span>`);
+  }
   if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
   let tape='';
@@ -15758,17 +15734,7 @@ async function _drainBasketQueue(preferredOrders = null){
       const swapItem = Object.values(allocMap).find(a => a && a.isOpportunitySwap && a.sacrifice);
       if (swapItem && swapItem.sacrifice) {
         const sac = swapItem.sacrifice;
-        const sellOrders = [{
-          variety: 'regular',
-          tradingsymbol: sac.symbol,
-          exchange: 'NSE',
-          transaction_type: 'SELL',
-          order_type: 'LIMIT',
-          quantity: sac.sharesToSell,
-          price: Number(sac.limitPrice || sac.price || sac.ltp || 0),
-          product: 'CNC',
-          validity: 'DAY'
-        }];
+        const sellOrders = RocketStrategy.swapSellBasket(sac);
         saveBasketToScannerUploads(sellOrders, 'Zerodha_Basket_Sell', [{ symbol: sac.symbol, reason: 'opportunity-swap-sacrifice' }]).catch(e => {
           console.warn('Failed to sync sacrifice sell basket to Zerodha_Basket_Sell:', e);
         });
@@ -16061,7 +16027,6 @@ function switchTab(n){
   // Performance analytics are intentionally deferred so tab switching paints immediately.
   if(n===2){if(PERF_DIRTY||!PERF_RENDERED)schedulePerformanceRender();}
   if(n===3&&window.RocketFinance) window.RocketFinance.render();
-  if(n===4&&window.RocketStratGen) window.RocketStratGen.render();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
   requestAnimationFrame(balanceGrids);
