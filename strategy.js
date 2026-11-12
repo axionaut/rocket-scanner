@@ -261,7 +261,7 @@
     const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 3.00;
     const maxLossRsLimit = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 250.0;
     // Profit-underwritten budget: loss is strictly bounded by available banked profit from 5-day pool
-    const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : maxLossRsLimit;
+    const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : 0;
     const maxLossRs = Math.max(0, Math.min(maxLossRsLimit, profitBudget));
     const targetPct = Number.isFinite(options.targetPct) ? Number(options.targetPct) : 1.25;
     const minDwellMs = Number.isFinite(options.minDwellMs) ? Number(options.minDwellMs) : 3600000;
@@ -376,7 +376,11 @@
       }
 
       const lossRs = Math.max(0, sharesToSell * (avgCost - ltp));
-      if (lossRs > maxLossRs) continue;
+      // Resizing changes the buyer's whole-share funding too. Validate the final
+      // quantities rather than retaining the gain estimated before the trim.
+      const finalBuyerShares = Math.floor(totalFunding / (buyerPx * 1.003));
+      const finalExpectedGainRs = finalBuyerShares * buyerPx * (targetPct / 100);
+      if (lossRs > maxLossRs || finalBuyerShares < 1 || finalExpectedGainRs + 1e-9 < lossRs) continue;
 
       const ler = liberatedUsable / (lossRs || 1);
       sacrifices.push({

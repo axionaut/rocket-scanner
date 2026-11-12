@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-11 13:22 IST'; // release build date (IST)
-const APP_VERSION=1683;
+const BUILD_TS='2026-11-12 10:01 IST'; // release build date (IST)
+const APP_VERSION=1684;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4868,46 +4868,38 @@ function rememberModelChoice(m){
 let _modelSeeded=false;
 let _modelChoiceEpoch=0;
 let _modelSwitchPending=false;
+let _strategySyncPending=null;
+let _strategySyncSignature=null;
 function syncStratGenDeployedState(){
-  try{
-    const source=(typeof readHelperResponse==='function')?readHelperResponse('/api/stratgen/deployed',{timeout:4000}):Promise.reject(Error('Helper unavailable'));
-    source.then(result=>{
-      if(result?.ok!==true)throw Error('Local deployment authority unavailable');
-      const d = result.deployed;
-      const el = document.getElementById('fModel');
-      let opt = document.getElementById('optStratGen');
-      const curM = floorModel();
-      if(d && d.name){
-        if(opt){opt.textContent='Deployed · '+d.name;opt.disabled=false;}
-        window.__deployedStratGen = d;
-        if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy((result.selectedModel||curM)==='STRATGEN'?d:((result.selectedModel||curM)==='MARKOV_3PCT'?'MARKOV_3PCT':null));
-        const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = curM==='MARKOV_3PCT'?'Markov · Multi-Horizon Swing (Trailing)':curM==='CUM'?'CUM - VWAP Trend & Breadth':d.name;
-      } else {
-        if(opt){opt.textContent='Deployed · none installed';opt.disabled=true;}
-        window.__deployedStratGen = null;
-        if(typeof RocketStrategy !== 'undefined') RocketStrategy.applyDeployedStrategy(curM==='MARKOV_3PCT'?'MARKOV_3PCT':null);
-        const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = curM==='MARKOV_3PCT'?'Markov · Multi-Horizon Swing (Trailing)':curM==='CUM'?'CUM - VWAP Trend & Breadth':'StratGen Alpha Engine';
-      }
-      syncSelectedModelFromHelper();
-      refreshBtstModelView();
-      renderStats();
-    }).catch(()=>{});
-  }catch(e){}
-}
-// v1634: deploy selects the strategy in the helper; clear returns to CUM. The
-// dropdown follows the helper (the single source of truth) without a reload.
-function syncSelectedModelFromHelper(){
-  if(_modelSwitchPending)return;
-  readHelperResponse('/api/btst/model',{timeout:4000}).then(m=>{
-    const model=String(m?.model||'').toUpperCase();
+  if(_modelSwitchPending)return Promise.resolve();
+  if(_strategySyncPending)return _strategySyncPending;
+  const epoch=_modelChoiceEpoch;
+  _strategySyncPending=readHelperResponse('/api/stratgen/deployed',{timeout:4000}).then(result=>{
+    if(epoch!==_modelChoiceEpoch||_modelSwitchPending)return;
+    if(result?.ok!==true)throw Error('Local deployment authority unavailable');
+    const model=String(result.selectedModel||'').toUpperCase();
+    if(!SELECTABLE_MODELS.includes(model))throw Error('Selected strategy unavailable');
+    const d=result.deployed||null;
+    const signature=JSON.stringify([model,d]);
     const el=document.getElementById('fModel');
-    if(!el||!SELECTABLE_MODELS.includes(model)||el.value===model)return;
-    el.value=model;RocketStrategy?.applyDeployedStrategy(model==='STRATGEN'?window.__deployedStratGen:(model==='MARKOV_3PCT'?'MARKOV_3PCT':null));initScoreFloorUI(true);refreshBtstModelView();
-    if(ALL.length)applyFilters({preservePage:true});
-  }).catch(()=>{});
+    if(signature===_strategySyncSignature&&(!el||el.value===model))return;
+    const changedModel=!!el&&el.value!==model;
+    const opt=document.getElementById('optStratGen');
+    if(opt){opt.textContent=d?.name?'Deployed \u00b7 '+d.name:'Deployed \u00b7 none installed';opt.disabled=!d?.name;}
+    window.__deployedStratGen=d;
+    if(el)el.value=model;
+    rememberModelChoice(model);
+    if(typeof RocketStrategy!=='undefined')RocketStrategy.applyDeployedStrategy(model==='STRATGEN'?d:(model==='MARKOV_3PCT'?'MARKOV_3PCT':null));
+    const brandTag=document.querySelector('.brand-tag');
+    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov \u00b7 Multi-Horizon Swing (Trailing)':model==='CUM'?'CUM - VWAP Trend & Breadth':(d?.name||'StratGen Alpha Engine');
+    if(changedModel)initScoreFloorUI(true);
+    refreshBtstModelView();
+    _strategySyncSignature=signature;
+  }).catch(()=>{}).finally(()=>{_strategySyncPending=null;});
+  return _strategySyncPending;
 }
+// One authoritative response carries both selection and installed strategy.
+function syncSelectedModelFromHelper(){return syncStratGenDeployedState();}
 function initModelUI(){
 
   try{
