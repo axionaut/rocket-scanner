@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-12 13:01 IST'; // release build date (IST)
-const APP_VERSION=1688;
+const BUILD_TS='2026-11-12 14:05 IST'; // release build date (IST)
+const APP_VERSION=1689;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5332,9 +5332,11 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const pick=(source.picks||[]).find(p=>normSym(p.symbol)===sym);
     const score=btstScoreOf(s.symbol);
     const floor=btstMinScore();
+    const ensScore=pick?.ensemble?.score;
     
     if(!Number.isFinite(score)||score<floor){
-      return {state:'WAIT',reason:`Markov prob ${score!=null?score.toFixed(1)+'%':'N/A'} is below ${floor}% probability floor`};
+      const ensLabel = ensScore != null ? ` (Ensemble ${ensScore >= 0 ? '+' : ''}${ensScore.toFixed(2)})` : '';
+      return {state:'WAIT',reason:`Ensemble-driven score ${score!=null?score.toFixed(1)+'%':'N/A'}${ensLabel} is below ${floor}% probability floor`};
     }
     if(!pick){
       return {state:'WAIT',reason:`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`};
@@ -15749,6 +15751,31 @@ async function _drainBasketQueue(preferredOrders = null){
     const audit=orders.map(o=>({symbol:o._meta?.sym,...o._meta?.recommendation}));
     await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy', audit);
     writeOk = true;
+
+    // When an Opportunity Swap is active in the dual plan, sync the sacrifice sell to Zerodha_Basket_Sell.json
+    try {
+      const allocMap = _dualPlanMemo?.val?.alloc || {};
+      const swapItem = Object.values(allocMap).find(a => a && a.isOpportunitySwap && a.sacrifice);
+      if (swapItem && swapItem.sacrifice) {
+        const sac = swapItem.sacrifice;
+        const sellOrders = [{
+          variety: 'regular',
+          tradingsymbol: sac.symbol,
+          exchange: 'NSE',
+          transaction_type: 'SELL',
+          order_type: 'LIMIT',
+          quantity: sac.sharesToSell,
+          price: Number(sac.limitPrice || sac.price || sac.ltp || 0),
+          product: 'CNC',
+          validity: 'DAY'
+        }];
+        saveBasketToScannerUploads(sellOrders, 'Zerodha_Basket_Sell', [{ symbol: sac.symbol, reason: 'opportunity-swap-sacrifice' }]).catch(e => {
+          console.warn('Failed to sync sacrifice sell basket to Zerodha_Basket_Sell:', e);
+        });
+      }
+    } catch(e) {
+      console.warn('Opportunity swap sell basket sync error:', e);
+    }
     recordModelBasketExport(orders);
     recordBtstExportedTargets(orders);
     _lastSavedBasketSig = targetSig;

@@ -261,8 +261,8 @@
     const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 50.0;
     const minLossPct = Number.isFinite(options.minLossPct) ? Number(options.minLossPct) : 0.75;
     // Profit-underwritten budget: loss is strictly bounded by available banked profit from 5-day pool
-    const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : 0;
-    const maxLossRs = Number.isFinite(options.maxLossRs) ? Math.max(0, Math.min(Number(options.maxLossRs), profitBudget)) : profitBudget;
+    const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : (Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 500);
+    const maxLossRs = Number.isFinite(options.maxLossRs) ? Math.max(0, Number(options.maxLossRs)) : profitBudget;
     const targetPct = Number.isFinite(options.targetPct) ? Number(options.targetPct) : 1.25;
     const minDwellMs = Number.isFinite(options.minDwellMs) ? Number(options.minDwellMs) : 3600000;
     const availableCash = Math.max(0, Number(options.availableCash || 0));
@@ -293,17 +293,13 @@
       return { eligible: false, buyer, minTicket, availableCash, reason: `Available cash (₹${availableCash.toFixed(0)}) covers minTicket (₹${minTicket.toFixed(0)}); no swap needed` };
     }
 
-    // Profit-underwritten gate: if banked net profit is 0, no speculative swap loss is allowed
-    if (maxLossRs <= 0) {
-      return { eligible: false, buyer, deficit, minTicket, availableCash, reason: 'No available banked net profit in 5-day pool to underwrite swap loss' };
-    }
-
     // 2. Filter and rank held positions for the best sacrifice
     const sacrifices = [];
     let greenRunnersCount = 0;
     let freshEntriesCount = 0;
     let bouncingCount = 0;
     let deepLossCount = 0;
+    let hasZombieHoldings = false;
 
     for (const h of heldPositions) {
       const sym = h.symbol || h.sym;
@@ -317,6 +313,13 @@
         greenRunnersCount++;
         continue;
       }
+
+      // Check Zombie Capital Exemption:
+      // Underwater position (unrealizedPct < 0) held for >= 7 sessions (or >= 10 calendar days).
+      const daysHeld = h.firstAt > 0 ? (now - h.firstAt) / 86400000 : (h.firstSeenDay ? (now - new Date(h.firstSeenDay).getTime()) / 86400000 : 0);
+      const sessionsHeld = Number.isFinite(h.sessionsHeld) ? h.sessionsHeld : Math.floor(daysHeld * (5 / 7));
+      const isZombie = (ltp < avgCost) && (daysHeld >= 10 || sessionsHeld >= 7);
+      if (isZombie) hasZombieHoldings = true;
 
       const lossPct = ((avgCost - ltp) / avgCost) * 100;
       // Skip near-breakeven spread noise (-0.01% to -0.49%)
@@ -335,9 +338,9 @@
 
       // Deficit-aware partial sizing bounded by profit underwriting budget in absolute rupees.
       // A deep underwater position (e.g. -5% or -10%) is trimmed by part-selling only as many shares
-      // as the absolute rupee loss budget (maxLossRs) allows.
+      // as the absolute rupee loss budget (maxLossRs) allows (or full settledQty if Zombie Capital).
       const lossPerShare = Math.max(0.01, avgCost - ltp);
-      const maxSharesByLoss = Math.floor(maxLossRs / lossPerShare);
+      const maxSharesByLoss = isZombie ? settledQty : Math.floor(maxLossRs / lossPerShare);
       if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
 
       const effectiveUsableLtp = ltp * usableCreditFactor;
@@ -354,12 +357,17 @@
         continue;
       }
 
-      // Profit-Underwritten Loss Check: loss in absolute rupees must be fully covered
-      // by available banked profit (maxLossRs). Deep underwater positions (-5%, -10%)
-      // can be trimmed by part-selling up to the rupee budget.
+      // Profit-Underwritten Loss Check & Asymmetric Expectancy Hurdle:
+      // Non-zombie loss must be fully covered by available banked profit (maxLossRs).
+      // Zombie capital is exempt from positive profitBudget, but strictly subject to the
+      // asymmetric expectancy hurdle: buyer potential gain >= sacrifice loss.
       const lossRs = Math.max(0, sharesToSell * (avgCost - ltp));
       const finalBuyerShares = Math.floor(totalFunding / (buyerPx * 1.003));
-      if (lossRs > maxLossRs || finalBuyerShares < 1) continue;
+      if (finalBuyerShares < 1) continue;
+      if (!isZombie && lossRs > maxLossRs) continue;
+
+      const buyerPotentialGain = finalBuyerShares * buyerPx * (targetPct / 100);
+      if (isZombie && buyerPotentialGain < lossRs) continue;
 
       const ler = liberatedUsable / (lossRs || 1);
       sacrifices.push({
@@ -372,6 +380,9 @@
         ltp,
         lossPct,
         lossRs,
+        isZombie,
+        daysHeld: Math.round(daysHeld),
+        sessionsHeld,
         liberatedGross,
         liberatedUsable,
         liberatedRs: liberatedGross, // backwards compatibility
@@ -384,10 +395,14 @@
     }
 
     if (!sacrifices.length) {
-      let specificReason = 'No held positions qualify for sacrifice';
       if (greenRunnersCount === heldPositions.length) {
-        specificReason = 'All open positions are profitable; profitable runners are strictly protected';
-      } else if ((greenRunnersCount + freshEntriesCount + bouncingCount) > 0) {
+        return { eligible: false, buyer, deficit, minTicket, reason: 'All open positions are profitable; profitable runners are strictly protected' };
+      }
+      if (maxLossRs <= 0 && !hasZombieHoldings) {
+        return { eligible: false, buyer, deficit, minTicket, availableCash, reason: 'No available banked net profit in 5-day pool to underwrite swap loss' };
+      }
+      let specificReason = 'No held positions qualify for sacrifice';
+      if ((greenRunnersCount + freshEntriesCount + bouncingCount) > 0) {
         specificReason = `No eligible sacrifice candidates (${greenRunnersCount} green, ${freshEntriesCount} fresh, ${bouncingCount} bouncing)`;
       }
       return { eligible: false, buyer, deficit, minTicket, reason: specificReason };
@@ -397,6 +412,7 @@
     sacrifices.sort((a, b) => (b.lossPct - a.lossPct) || (b.lossRs - a.lossRs));
     const chosen = sacrifices[0];
     const trimLabel = chosen.isPartial ? `Trim ${chosen.sharesToSell}/${chosen.qty} sh` : `Sell full ${chosen.sharesToSell} sh`;
+    const zombieTag = chosen.isZombie ? ' [Zombie Capital]' : '';
 
     return {
       eligible: true,
@@ -405,7 +421,7 @@
       minTicket,
       deficit,
       availableCash,
-      reason: `${trimLabel} of ${chosen.symbol} (-₹${chosen.lossRs.toFixed(1)}, -${chosen.lossPct.toFixed(2)}%) to liberate ₹${chosen.liberatedGross.toFixed(0)} (₹${chosen.liberatedUsable.toFixed(0)} usable) for ${buyer.symbol} (Score ${buyer.score})`
+      reason: `${trimLabel} of ${chosen.symbol}${zombieTag} (-₹${chosen.lossRs.toFixed(1)}, -${chosen.lossPct.toFixed(2)}%) to liberate ₹${chosen.liberatedGross.toFixed(0)} (₹${chosen.liberatedUsable.toFixed(0)} usable) for ${buyer.symbol} (Score ${buyer.score})`
     };
   }
 
