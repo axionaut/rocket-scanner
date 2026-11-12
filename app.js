@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-12 11:44 IST'; // release build date (IST)
-const APP_VERSION=1687;
+const BUILD_TS='2026-11-12 13:01 IST'; // release build date (IST)
+const APP_VERSION=1688;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='STRATGEN'?'StratGen Alpha':v==='MARKOV_3PCT'?'Markov · Multi-Horizon Swing (Trailing)':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='STRATGEN'?'StratGen Alpha':v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
@@ -4464,7 +4464,7 @@ function initScoreFloorUI(force=false){
     el.value=stored===null?(model==='MARKOV_3PCT'?'60':ranked?'2.1':''):stored;
     el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'60':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step=model==='MARKOV_3PCT'?'1':'0.1';
     el.style.width=model==='CUM'?'140px':model==='MARKOV_3PCT'?'110px':'90px';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='STRATGEN'?'StratGen Floor':(model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Markov Prob Floor (%)':(model==='ENS'?'Ensemble':model)+' Floor');
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='STRATGEN'?'StratGen Floor':(model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Markov · ENS Floor (%)':(model==='ENS'?'Ensemble':model)+' Floor');
     el.title=model==='MARKOV_3PCT'?'Markov multi-horizon bounce probability floor (40% to 100%). Default 60% filters for Tier 1 high-probability alpha stocks. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
@@ -4851,7 +4851,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov Swing (Trailing)',STRATGEN:'StratGen Alpha',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov · mRMR · Ensemble',STRATGEN:'StratGen Alpha',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4894,7 +4894,7 @@ function syncStratGenDeployedState(){
     rememberModelChoice(model);
     if(typeof RocketStrategy!=='undefined')RocketStrategy.applyDeployedStrategy(model==='STRATGEN'?d:(model==='MARKOV_3PCT'?'MARKOV_3PCT':null));
     const brandTag=document.querySelector('.brand-tag');
-    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov \u00b7 Multi-Horizon Swing (Trailing)':model==='CUM'?'CUM - VWAP Trend & Breadth':(d?.name||'StratGen Alpha Engine');
+    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov \u00b7 mRMR \u00b7 Ensemble (Option A)':model==='CUM'?'CUM - VWAP Trend & Breadth':(d?.name||'StratGen Alpha Engine');
     if(changedModel)initScoreFloorUI(true);
     refreshBtstModelView();
     _strategySyncSignature=signature;
@@ -5342,6 +5342,12 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(pick.dropPct != null && pick.dropPct < 3.0){
       return {state:'WAIT',reason:`Markov pullback drop ${pick.dropPct.toFixed(1)}% is below 3.0% threshold`};
     }
+    if(pick.ensemble?.saturated){
+      return {
+        state: 'WAIT',
+        reason: `Ensemble Saturation: Top-decile climactic spike (score ${pick.ensemble.score >= 0 ? '+' : ''}${pick.ensemble.score.toFixed(2)} >= 2.15); awaiting stabilization to prevent buying mid-spike top.`
+      };
+    }
     const price=Number(s.price);
     const targetPrice=+(price*(1 + currentModelTargetPct()/100)).toFixed(2);
     const stopLossPct=pick.stopPct||2.8;
@@ -5359,7 +5365,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
         reason: `Anti-Chase: ${s.symbol} extended too far (+${vwapDiff ? vwapDiff + '% vs VWAP' : ''}${vwapDiff && openDiff ? ', ' : ''}${openDiff ? '+' + openDiff + '% vs Open' : ''}). Awaiting pullback to VWAP.`
       };
     }
-    const isLiveTriggered = Boolean(pick.triggered || (pick.isArmed && dayOpen > 0 && price >= dayOpen));
+    const isLiveTriggered = Boolean(pick.triggered || (pick.isArmed && !pick.ensemble?.saturated && dayOpen > 0 && price >= dayOpen));
 
     if(isLiveTriggered){
       noteCrossing(s.symbol, price, floor);
@@ -5367,7 +5373,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
         state:'GO',
         reason:(pick.why && pick.triggered)
           ? pick.why
-          : `Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) Green Reversal (Price ₹${price.toFixed(2)} >= Open ₹${(dayOpen||price).toFixed(2)}) | ${pick.p5d}% 5D win rate`,
+          : `Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) Green Reversal (Price ₹${price.toFixed(2)} >= Open ₹${(dayOpen||price).toFixed(2)})${pick.ensemble?.score != null ? ' | Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) : ''} | ${pick.p5d}% 5D win rate`,
         targetPrice,
         stopPrice,
         targetPct:currentModelTargetPct(),
@@ -5384,7 +5390,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     return {
       state:'WAIT',
       reason:pick.isArmed
-        ?`Arming: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop). Awaiting intraday reversal (${conditionText})`
+        ?`Arming: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop). Awaiting intraday reversal (${conditionText})${pick.ensemble?.score != null ? ' [Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) + ']' : ''}`
         :`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`
     };
   }

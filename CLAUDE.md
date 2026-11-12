@@ -12,7 +12,7 @@ This document is the single source of truth for how Rocket Scanner works **today
 - All agents must cross-critique each other until a 100% unanimous consensus is achieved before finalizing code changes.
 - Skipping this multi-agent alignment protocol is forbidden.
 
-Current version: **v1687** (2026-11-12). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
+Current version: **v1688** (2026-11-12). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
 
 StratGen research controls read only the current form: fixed shared_rs exits, selected history and auto-refine. Removed target/horizon controls are never accessed; older saved controls retain their supported history and auto-refine values, and running-job display uses the shared-exit summary. SDL is verified through its actual UI start handler into a live research worker.
 

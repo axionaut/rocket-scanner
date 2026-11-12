@@ -1,10 +1,11 @@
-# Active Task: Deployed v1687 / Operational
+# Active Task: Deployed v1688 / Operational
 
-Rocket Scanner v1687 deployed at 2026-11-12 11:44 IST. System operational and in sync with origin/master.
+Rocket Scanner v1688 deployed at 2026-11-12 13:01 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1688:** Unified Markov-mRMR-Ensemble sequential strategy deployment (Option A)
 - **v1687:** Prioritize deepest loser COMSYN, exclude T1 BTST holdings, ratchet swap GTTs, and enable instant margin updates
 - **v1686:** Unclamp OS loss budget to full profit pool and enforce pure trailing stop below LTP
 - **v1685:** Streamline PUOS: pure worst-% loss ranking in absolute rupees, partial trims for deep losers, purge dead GTT IDs
