@@ -1,10 +1,11 @@
-# Active Task: Deployed v1698 / Operational
+# Active Task: Deployed v1699 / Operational
 
-Rocket Scanner v1698 deployed at 2026-11-13 11:37 IST. System operational and in sync with origin/master.
+Rocket Scanner v1699 deployed at 2026-11-13 11:48 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1699:** Remove open ceiling (+3.5%) from Anti-Chase gate, preserving VWAP +1.5% extension check
 - **v1698:** Remove obsolete basket export status from UI header strip
 - **v1697:** Retire Replay strip and optimize Auto-Buy execution speed via direct push and 500ms bridge interval
 - **v1696:** Show actual Ensemble readiness and buy-band reasons on empty rankings

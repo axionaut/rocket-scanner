@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 11:37 IST'; // release build date (IST)
-const APP_VERSION=1698;
+const BUILD_TS='2026-11-13 11:48 IST'; // release build date (IST)
+const APP_VERSION=1699;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5343,13 +5343,12 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(!Number.isFinite(price)||price<=0||!Number.isFinite(dayOpen)||dayOpen<=0||!Number.isFinite(vwap)||vwap<=0){
       return {state:'WAIT',reason:'Awaiting a fresh price, day open and session VWAP'};
     }
-    const isExtended = (vwap > 0 && price > vwap * 1.015) || (dayOpen > 0 && price > dayOpen * 1.035);
+    const isExtended = vwap > 0 && price > vwap * 1.015;
     if(isExtended){
       const vwapDiff = vwap > 0 ? ((price / vwap - 1) * 100).toFixed(1) : null;
-      const openDiff = dayOpen > 0 ? ((price / dayOpen - 1) * 100).toFixed(1) : null;
       return {
         state: 'WAIT',
-        reason: `Anti-Chase: ${s.symbol} extended too far (+${vwapDiff ? vwapDiff + '% vs VWAP' : ''}${vwapDiff && openDiff ? ', ' : ''}${openDiff ? '+' + openDiff + '% vs Open' : ''}). Awaiting pullback to VWAP.`
+        reason: `Anti-Chase: ${s.symbol} extended too far (+${vwapDiff ? vwapDiff + '% vs VWAP' : ''}). Awaiting pullback to VWAP.`
       };
     }
     const isLiveTriggered = Boolean(pick.triggered && pick.isArmed && !pick.ensemble?.saturated && dayOpen > 0 && price >= dayOpen);
