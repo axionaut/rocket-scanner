@@ -1,10 +1,11 @@
-# Active Task: Deployed v1691 / Operational
+# Active Task: Deployed v1692 / Operational
 
-Rocket Scanner v1691 deployed at 2026-11-13 09:03 IST. System operational and in sync with origin/master.
+Rocket Scanner v1692 deployed at 2026-11-13 09:07 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1692:** Weight lower MLoT session medians more heavily in history totals
 - **v1691:** Preserve live quote fields, background five-minute history, require live VWAP and remove reviewer workflow
 - **v1690:** Purge StratGen engine, unfreeze helper via async daily history and session memoization, fix Markov worker float32 overflow, and align PUOS dual basket export
 - **v1689:** Filter stack Ensemble ranking, PUOS Zombie Capital exemption, and ratchet trailing stop fix
