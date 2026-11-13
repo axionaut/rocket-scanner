@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 09:26 IST'; // release build date (IST)
-const APP_VERSION=1694;
+const BUILD_TS='2026-11-13 09:42 IST'; // release build date (IST)
+const APP_VERSION=1695;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4576,6 +4576,11 @@ async function loadBtstPicks(){
       if(!rank||String(rank.asOf)<=String(BTST.rank.asOf))rank=BTST.rank;
       if(!picks||String(picks.asOf)<=String(BTST.rank.asOf))picks=BTST.rank;
     }
+    const selectedModel=floorModel();
+    const currentModelSnapshot=s=>s?.session===today&&s.activeModel===selectedModel;
+    if(currentModelSnapshot(rank)&&rank.mode==='live'&&
+       (!currentModelSnapshot(picks)||picks.mode!=='live'||String(rank.asOf)>=String(picks.asOf)))picks=rank;
+    if(!currentModelSnapshot(picks))picks=null;
     const target=tm||BTST.targetModel;
     const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session,picks?.activeModel,picks?.rules?.minScore,picks?.modelSelectedAt,picks?.ensemblePipeline?.asOf,picks?.ensemblePipeline?.state,picks?.ensemblePipeline?.reason].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session,rank?.activeModel,rank?.rules?.minScore,rank?.modelSelectedAt,rank?.ensemblePipeline?.asOf,rank?.ensemblePipeline?.state,rank?.ensemblePipeline?.reason].join('|');
     const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length,ENTRY_TRIGGERS?.at].join('|');
@@ -14451,7 +14456,11 @@ function renderStatusBar(){
     const age=Date.now()-Date.parse(p?.asOf);
     const ready=p?.ok===true&&age>=0&&age<=180000;
     const labels={starting:'Starting',history:'Loading history',features:'Building indicators',mrmr:'Learning market regimes',training:'Training Ensemble',scoring:'Scoring candidates',ready:'Scores ready',error:'Scores unavailable',stale:'Refreshing scores'};
-    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(p?.reason||'Waiting for current market scores')}">Ensemble: ${escHtml(ready?'Scores ready':labels[p?.state]||'Waiting for scores')}</span>`);
+    const scores=BTST.rank?.ranking||BTST.data?.ranking||[];
+    const floor=btstMinScore();
+    const buyBand=scores.filter(r=>Number.isFinite(r[1])&&r[1]>=floor&&r[1]<2.15).length;
+    const scoreStatus=ready?`Scores ready · ${scores.length} ranked · ${buyBand} in buy band`:labels[p?.state]||'Waiting for scores';
+    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(p?.reason||'Waiting for current market scores')}">Ensemble: ${escHtml(scoreStatus)}</span>`);
   }
   if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);

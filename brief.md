@@ -1,10 +1,11 @@
-# Active Task: Deployed v1694 / Operational
+# Active Task: Deployed v1695 / Operational
 
-Rocket Scanner v1694 deployed at 2026-11-13 09:26 IST. System operational and in sync with origin/master.
+Rocket Scanner v1695 deployed at 2026-11-13 09:42 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1695:** Deliver Ensemble readiness through push and polling and explain empty buy bands
 - **v1694:** Recover unconfirmed armed protection when broker GTT is absent
 - **v1693:** Fix pending candle reads and recreate armed protection after stale GTT reconciliation
 - **v1692:** Weight lower MLoT session medians more heavily in history totals
