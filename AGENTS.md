@@ -1,16 +1,7 @@
 # Working instructions
 
-- Work as a business and technical partner. Keep releases fast and scoped.
+- Work as a business and technical partner. Keep releases fast and scoped. Work directly unless the owner explicitly requests delegation.
 
-## Mandatory Multi-Agent Alignment & Verification Protocol - 9 November 2026
-
-- **Every implementation must be verified with multiple specialized subagents/agents.**
-- Before writing, modifying, or deploying user-facing strategies or core logic, run a multi-agent critique loop:
-  1. **Intent & Transcript Auditor:** Audits the conversation history from Step 0 to ensure 100% alignment with the user's explicit prompts, instructions, and constraints (no invented rules, no hallucinations).
-  2. **Data & Experiment Verifier:** Audits the actual empirical math, scripts, and backtest results to ensure numbers and trade mechanics are mathematically true and grounded.
-  3. **Implementation & Architecture Critic:** Reviews live code line by line to detect flaws, gate locks, whipsaws, or divergence between empirical research and production.
-- All agents must cross-critique each other until a 100% unanimous consensus is achieved before finalizing code changes.
-- Skipping this multi-agent alignment protocol is forbidden.
 
 ## Mandatory Release Protocol (Release Expert) - 8 November 2026
 
@@ -18,7 +9,7 @@
 - Whenever any user-facing code or strategy change is ready to deploy, hand off the release to the Release Expert by executing:
   `node dev/release.cjs "<brief release description>"`
 - The Release Expert enforces that:
-  1. `app.js`, `strategy.js`, `stratgen-tab.js`, and `finance.js` pass syntax validation.
+  1. `app.js`, `strategy.js`, and `finance.js` pass syntax validation.
   2. `APP_VERSION` in `app.js` is automatically incremented.
   3. `BUILD_TS` in `app.js` is stamped with the exact current IST timestamp (`YYYY-MM-DD HH:mm IST`).
   4. Documentation files (`brief.md`, `CLAUDE.md`, `AGENTS.md`) are synchronized with the new version and release description.

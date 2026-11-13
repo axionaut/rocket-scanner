@@ -1,20 +1,13 @@
 > Current owner scope (12 November 2026): StratGen is retired and removed from the active system. Historical notes below describe earlier releases and are not active requirements. The selected NSE engine is the sequential Markov ? causal mRMR ? five-member Ensemble funnel. Shared account allocation, loss ledger and trailing protection remain active independently of retired research features. Helper health uses `/api/health`.
 
+Owner workflow update (13 November 2026). Work directly unless the owner explicitly requests delegation.
+
 # Rocket Scanner — Live System Spec & Release Runbook
 
 This document is the single source of truth for how Rocket Scanner works **today**: architecture, trading rules and the release workflow. Keep it current: when a release changes behaviour, edit the section it changes; do not append a changelog here.
 
-## Mandatory Multi-Agent Alignment & Verification Protocol - 9 November 2026
 
-- **Every implementation must be verified with multiple specialized subagents/agents.**
-- Before writing, modifying, or deploying user-facing strategies or core logic, run a multi-agent critique loop:
-  1. **Intent & Transcript Auditor:** Audits the conversation history from Step 0 to ensure 100% alignment with the user's explicit prompts, instructions, and constraints (no invented rules, no hallucinations).
-  2. **Data & Experiment Verifier:** Audits the actual empirical math, scripts, and backtest results to ensure numbers and trade mechanics are mathematically true and grounded.
-  3. **Implementation & Architecture Critic:** Reviews live code line by line to detect flaws, gate locks, whipsaws, or divergence between empirical research and production.
-- All agents must cross-critique each other until a 100% unanimous consensus is achieved before finalizing code changes.
-- Skipping this multi-agent alignment protocol is forbidden.
-
-Current version: **v1690** (2026-11-12). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
+Current version: **v1691** (2026-11-13). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
 
 StratGen research controls read only the current form: fixed shared_rs exits, selected history and auto-refine. Removed target/horizon controls are never accessed; older saved controls retain their supported history and auto-refine values, and running-job display uses the shared-exit summary. SDL is verified through its actual UI start handler into a live research worker.
 

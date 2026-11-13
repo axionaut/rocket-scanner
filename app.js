@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-12 15:26 IST'; // release build date (IST)
-const APP_VERSION=1690;
+const BUILD_TS='2026-11-13 09:03 IST'; // release build date (IST)
+const APP_VERSION=1691;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5353,8 +5353,11 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const stopPrice=+(price*(1-stopLossPct/100)).toFixed(2);
 
     const quote = _universeMap.get(s.symbol);
-    const dayOpen = Number(quote?.open || s.open1d || pick.open || s.open || 0);
-    const vwap = Number(quote?.vwap || s.vwap || 0);
+    const dayOpen = Number(quote?.open);
+    const vwap = Number(quote?.vwap);
+    if(!Number.isFinite(price)||price<=0||!Number.isFinite(dayOpen)||dayOpen<=0||!Number.isFinite(vwap)||vwap<=0){
+      return {state:'WAIT',reason:'Awaiting a fresh price, day open and session VWAP'};
+    }
     const isExtended = (vwap > 0 && price > vwap * 1.015) || (dayOpen > 0 && price > dayOpen * 1.035);
     if(isExtended){
       const vwapDiff = vwap > 0 ? ((price / vwap - 1) * 100).toFixed(1) : null;
@@ -10473,7 +10476,7 @@ function _renderMethodologyInner(){
     <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from the 09:15 open, any time a fresh score crosses the selected model's floor with a fresh price. Market-trend gates are removed for all models. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
 </section>
     <details id="meth-models" class="meth-detail"><summary>Models, scoring and exits</summary><h3>Live score-crossing engine</h3>
-    <p>The selected model (Ensemble, PATH or Cumulative Change) supplies the recommendation table, counts, allocation and basket. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
+    <p>The selected model supplies the recommendation table, counts, allocation and basket. Markov / mRMR / Ensemble filters for a green prior week and at least two completed red days with a cumulative drop of at least 3%, applies causal regime-specific mRMR weights, then ranks candidates with the five Ensemble learners. Its default score floor is 1.6 and saturation cap is 2.15. Entry also requires a fresh quote, a green intraday reversal and the VWAP/open anti-chase bands. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings.</p></div>
     <div class="m-card"><h4>CUM - VWAP Trend &amp; Breadth</h4><p>Native ten-second VWAP-gap zero crossing and original positive score below +0.5. A native two-rise trigger is consumed when it fires; only a second rise greater than three times the first passes. Price must be above session VWAP and the 09:15-09:29 opening high after 09:30. The frozen March-selected 200-stock sample needs at least 100 fresh quotes and 50% above their opens. Previous completed stock close must exceed EMA20 &gt; EMA50, and at least 60% of sample prior closes must exceed EMA20. Missing context waits. Shared score allocation, held-add/rebuy rules, fees, liquidity and trailing exits apply, with no minimum or maximum hold. Account replay shows modeled trades using the recorded account snapshot; it is not exact tick or broker performance.</p></div>
