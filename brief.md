@@ -1,10 +1,11 @@
-# Active Task: Deployed v1695 / Operational
+# Active Task: Deployed v1696 / Operational
 
-Rocket Scanner v1695 deployed at 2026-11-13 09:42 IST. System operational and in sync with origin/master.
+Rocket Scanner v1696 deployed at 2026-11-13 09:47 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1696:** Show actual Ensemble readiness and buy-band reasons on empty rankings
 - **v1695:** Deliver Ensemble readiness through push and polling and explain empty buy bands
 - **v1694:** Recover unconfirmed armed protection when broker GTT is absent
 - **v1693:** Fix pending candle reads and recreate armed protection after stale GTT reconciliation

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 09:42 IST'; // release build date (IST)
-const APP_VERSION=1695;
+const BUILD_TS='2026-11-13 09:47 IST'; // release build date (IST)
+const APP_VERSION=1696;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14135,9 +14135,18 @@ function emptyBoardReason(){
   if(!isEquitySession(Date.now()))return 'Market closed - no buy recommendations. Use Show ineligible to inspect every stock.';
   const stale=universePriceStaleness();
   if(stale)return 'No buy recommendations: '+escHtml(stale)+'. Use Show ineligible to inspect every stock.';
+  if(floorModel()==='MARKOV_3PCT'){
+    const p=BTST.data?.ensemblePipeline||BTST.rank?.ensemblePipeline;
+    const age=Date.now()-Date.parse(p?.asOf);
+    if(p?.ok!==true||!(age>=0&&age<=180000))return 'Awaiting fresh Ensemble scores: '+escHtml(p?.reason||'scorer is starting')+'.';
+    const scores=BTST.rank?.ranking||BTST.data?.ranking||[];
+    const floor=btstMinScore(),inBand=scores.filter(r=>Number.isFinite(r[1])&&r[1]>=floor&&r[1]<2.15).length;
+    if(!inBand)return 'Scores are ready, but no current candidate is in the Ensemble buy band ('+floor+' to below 2.15).';
+    return inBand+' candidate'+(inBand===1?' is':'s are')+' in the Ensemble buy band, but current execution checks block buying. Use Show ineligible to see why.';
+  }
   const d=btstToday();
   if(!d)return escHtml(btstWaitReason())+'.';
-  if(!d.picks.length)return `No picks today: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}. On the tested history that happens on about 1 session in 4 - sitting out is the rule, not a failure.`;
+  if(!d.picks.length)return `No current picks: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}.`;
   return `Today's picks (${escHtml(d.picks.map(p=>p.symbol).join(', '))}) are held, stale or blocked. Use Show ineligible to see why.`;
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
