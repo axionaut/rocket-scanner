@@ -925,6 +925,32 @@ function bookedSession(session,holdingCosts,tradebook){
     return model==='CUM'&&Number.isFinite(score)&&Number.isFinite(floor)&&score>=floor+CUM_ENTRY_BAND;
   }
 
+  // Relative admission, not a fixed numeric threshold. Deterministic ties keep
+  // the shortlist bounded even when several committee scores are identical.
+  const MEM_PICK_POLICY = 'mem-top5-positive-vwap-v1';
+  function selectMemCandidates(ranking) {
+    const seen=new Set();
+    const positive=(ranking||[]).filter(r=>Array.isArray(r)&&typeof r[0]==='string'&&Number.isFinite(r[1])&&r[1]>0)
+      .map(([s,score])=>[s.toUpperCase(),score]).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]))
+      .filter(([s])=>{if(seen.has(s))return false;seen.add(s);return true;});
+    const shortlist=positive.slice(0,5);
+    return {policy:MEM_PICK_POLICY,limit:5,positiveCount:positive.length,topSymbols:shortlist.map(r=>r[0]),cutoff:shortlist.length?shortlist[shortlist.length-1][1]:null,shortlist};
+  }
+  function memEntryState(source,symbol,quote,now=Date.now()) {
+    if(source?.rules?.pickPolicy!==MEM_PICK_POLICY)return {state:'WAIT',reason:'Awaiting the adaptive top-five strategy update'};
+    const p=source.ensemblePipeline,at=Date.parse(p?.asOf),sym=String(symbol||'').toUpperCase();
+    if(source.ok!==true||p?.ok!==true||source.session!==nseClock(now).day||!Number.isFinite(at)||now<at||now-at>180000)return {state:'WAIT',reason:'Awaiting fresh combined-model scores'};
+    if(!source.selection?.topSymbols?.includes(sym))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Outside the top five positive Ensemble candidates'};
+    const price=Number(quote?.price),vwap=Number(quote?.vwap),age=now-Number(quote?.priceAt);
+    if(quote?.priceSource!=='live tick'||!Number.isFinite(age)||age<0||age>120000||!(price>0&&vwap>0))return {state:'WAIT',reason:'Awaiting a fresh price and session VWAP'};
+    if(!nseContinuous(now,sym))return {state:'WAIT',reason:'Outside continuous trading session'};
+    if(price<vwap)return {state:'WAIT',reason:`Awaiting VWAP reclaim (Price ₹${price.toFixed(2)} < VWAP ₹${vwap.toFixed(2)})`};
+    if(price>vwap*1.015)return {state:'WAIT',reason:'Outside VWAP anti-chase band (+1.5%)'};
+    const pick=source.picks?.find(p=>p.symbol===sym);
+    if(!pick?.triggered||!source.ranking?.some(r=>r[0]===sym&&Number.isFinite(r[1])&&r[1]>0))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting current execution eligibility'};
+    return {state:'GO',reason:'Top-five positive Ensemble candidate; fresh VWAP entry confirmed'};
+  }
+
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
   function entryGateApplies(){
     return false;
@@ -940,6 +966,7 @@ function bookedSession(session,holdingCosts,tradebook){
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
     applySelectedModel,
     entryScoreCapped,
+    MEM_PICK_POLICY,selectMemCandidates,memEntryState,
     CUM_ENTRY_BAND,
     CUM_REFINEMENT,
     cumRefinementReason,

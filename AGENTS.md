@@ -2,6 +2,14 @@
 
 - Work as a business and technical partner. Keep releases fast and scoped. Work directly unless the owner explicitly requests delegation.
 
+## Combined model selection - owner, 13 November 2026
+
+- Markov structural eligibility and common universe checks precede candidate inference; causal regime-specific mRMR weights feed the existing five-member Ensemble.
+- Select at most the top five strictly positive Ensemble scores, with deterministic ties. The fifth selected score is an automatic relative cutoff, not an editable fixed 0.5 threshold. Fewer than five positive candidates means a smaller shortlist.
+- Preserve the tested selection order: rank the reference candidate pool, select five, then require fresh live VWAP reclaim and the existing +1.5% VWAP anti-chase band. Do not silently promote the sixth name because a higher-ranked name is waiting.
+- Only live entry-qualified candidates publish numeric recommendation scores. Failed stages remain inspectable with reasons. Shared allocation, broker validation, fees, cash controls, and trailing exits remain authoritative.
+- Preserve full-universe market/sector context and the original cross-sectional score calibration. Removing reference stocks from those calculations changes the model; do not claim that pruning alone preserves the tested strategy.
+
 
 ## Mandatory Release Protocol (Release Expert) - 8 November 2026
 

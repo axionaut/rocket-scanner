@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 13:25 IST'; // release build date (IST)
-const APP_VERSION=1702;
+const BUILD_TS='2026-11-13 14:21 IST'; // release build date (IST)
+const APP_VERSION=1703;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3747,7 +3747,7 @@ function enabledModelsLabel(){
 }
 function dualScoreCell(row){
   const act = getRowActionState(row);
-  const ms = btstScoreOf(row.symbol) ?? (Number.isFinite(Number(row.score)) ? Number(row.score) : null);
+  const ms = !row._us&&floorModel()==='MARKOV_3PCT'?(act.state==='GO'?btstScoreOf(row.symbol):null):btstScoreOf(row.symbol) ?? (Number.isFinite(Number(row.score)) ? Number(row.score) : null);
   const scoreText = Number.isFinite(ms) ? (Math.abs(ms) >= 10 ? ms.toFixed(1) : (ms >= 0 ? '+' : '') + ms.toFixed(2)) : null;
   const scoreHtml = scoreText ? `<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:13px;color:${act.state==='GO'?'var(--green)':'var(--amber)'}">${scoreText}</span>` : '';
 
@@ -3816,6 +3816,7 @@ function setRadarEvidenceScore(r){
 }
 function radarScoreTitle(r){
   const p=r?.btstPick;
+  if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
 }
@@ -4459,13 +4460,20 @@ function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
+    el.readOnly=model==='MARKOV_3PCT';
+    if(model==='MARKOV_3PCT'){
+      el.value=BTST.data?.selection?.cutoff??'';el.placeholder='Automatic';
+      el.title='Automatic top-five positive Ensemble shortlist. Cutoff changes with current scores; regime-specific mRMR weights adapt to the market. No fixed floor.';
+      const label=document.getElementById('scoreFloorLabel');if(label)label.textContent='Top 5 cutoff';
+      _scoreFloorSeeded=model;return;
+    }
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
-    el.value=stored===null?(model==='MARKOV_3PCT'?'0.5':ranked?'2.1':''):stored;
-    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'0.5':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
+    el.value=stored===null?(ranked?'2.1':''):stored;
+    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
     el.style.width=model==='CUM'?'140px':model==='MARKOV_3PCT'?'110px':'90px';
     const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Ensemble Floor':(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=model==='MARKOV_3PCT'?'Ensemble committee score after the Markov and mRMR filters. Default 0.5 (regime-adaptive); uncapped above. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    el.title=model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4935,6 +4943,7 @@ function refreshBtstModelView(){
 // feed _getRowActionStateUncached: GO still comes only from the engine's own FINAL picks list, so
 // lowering this cannot manufacture a buy and raising it cannot suppress one (invariant 5).
 function btstFloorOverride(){
+  if(floorModel()==='MARKOV_3PCT')return null;
   const v=parseFloat(document.getElementById('fScoreFloor')?.value);
   return Number.isFinite(v)?v:null;
 }
@@ -4954,8 +4963,7 @@ function btstEngineMinScore(){
 function btstMinScore(){
   if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
   if(floorModel()==='MARKOV_3PCT'){
-    const o=btstFloorOverride();
-    return o!==null?o:(btstEngineMinScore()??0.5);
+    return BTST.data?.selection?.cutoff??BTST.rank?.selection?.cutoff??0;
   }
   const r=btstRanking();
   if(r&&r.model!==floorModel())return r.minScore;
@@ -5117,6 +5125,7 @@ function btstCrossingState(s){
 // that list is now produced under a floor the owner chose.
 // 23 Oct 2026 (owner): no floor clamp anywhere (page, helper, engine); the saved floor is used as typed.
 function pushScoreFloorToEngine(raw,model=floorModel()){
+  if(model==='MARKOV_3PCT')return;
   clearTimeout(_floorPushTimer);
   _floorPushTimer=setTimeout(()=>{
     const v=String(raw??'').trim(),request=model+':'+v;
@@ -5297,84 +5306,14 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     return btstCrossingState(s)||{state:'WAIT',reason:'Awaiting native VWAP crossing'};
   }
   if(floorModel()==='MARKOV_3PCT'){
-    const source=BTST.data;
-    if(source?.activeModel!=='MARKOV_3PCT')return {state:'WAIT',reason:'Awaiting Markov 3% strategy observations'};
-    const pipeline=source.ensemblePipeline,now=Date.now(),scoredAt=Date.parse(pipeline?.asOf);
-    if(source.ok!==true||source.session!==getSessionDate()||pipeline?.ok!==true||!Number.isFinite(scoredAt)||now<scoredAt||now-scoredAt>180000){
-      return {state:'WAIT',reason:pipeline?.reason||'Awaiting fresh Markov / mRMR / Ensemble scores'};
-    }
-    const liveQuote=_universeMap.get(s.symbol),liveAt=Number(liveQuote?.priceAt);
-    if(!Number.isFinite(liveAt)||liveAt<=0||now<liveAt||now-liveAt>120000)return {state:'WAIT',reason:'Awaiting a fresh stock quote for the Ensemble setup'};
-    const held=getCombinedOpenPositionMap()[s.symbol];
-    if(held?.qty>0)return {state:'WAIT',reason:'Markov swing position already active'};
-    const sym=normSym(s.symbol);
-    if(AUTO_BUY_STATUS?.executedToday?.includes(sym)||AUTO_BUY_STATUS?.executedToday?.includes(s.symbol)){
-      return {state:'WAIT',reason:`Markov strategy already executed today for ${s.symbol}; waiting for next session`};
-    }
-    const pick=(source.picks||[]).find(p=>normSym(p.symbol)===sym);
-    const score=btstScoreOf(s.symbol);
-    const floor=btstMinScore();
-    const ensScore=pick?.ensemble?.score;
-    
-    if(!Number.isFinite(score)||score<floor){
-      const ensLabel = ensScore != null ? ` (Ensemble ${ensScore >= 0 ? '+' : ''}${ensScore.toFixed(2)})` : '';
-      return {state:'WAIT',reason:`Ensemble-driven score ${score!=null?score.toFixed(2):'N/A'}${ensLabel} is below the ${floor} Ensemble floor`};
-    }
-    if(!pick){
-      return {state:'WAIT',reason:`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`};
-    }
-    if(pick.dropPct != null && pick.dropPct < 3.0){
-      return {state:'WAIT',reason:`Markov pullback drop ${pick.dropPct.toFixed(1)}% is below 3.0% threshold`};
-    }
-    // v1700: Saturation cap (2.15) retired per empirical sweep to allow high-momentum breakouts (e.g. AMBER)
-    const price=Number(s.price);
-    const targetPrice=+(price*(1 + currentModelTargetPct()/100)).toFixed(2);
-    const stopLossPct=pick.stopPct||2.8;
-    const stopPrice=+(price*(1-stopLossPct/100)).toFixed(2);
-
-    const quote = _universeMap.get(s.symbol);
-    const dayOpen = Number(quote?.open);
-    const vwap = Number(quote?.vwap);
-    if(!Number.isFinite(price)||price<=0||!Number.isFinite(dayOpen)||dayOpen<=0||!Number.isFinite(vwap)||vwap<=0){
-      return {state:'WAIT',reason:'Awaiting a fresh price, day open and session VWAP'};
-    }
-    const isExtended = vwap > 0 && price > vwap * 1.015;
-    if(isExtended){
-      const vwapDiff = vwap > 0 ? ((price / vwap - 1) * 100).toFixed(1) : null;
-      return {
-        state: 'WAIT',
-        reason: `Anti-Chase: ${s.symbol} extended too far (+${vwapDiff ? vwapDiff + '% vs VWAP' : ''}). Awaiting pullback to VWAP.`
-      };
-    }
-    const isAboveVwap = vwap > 0 && price >= vwap;
-    const isLiveTriggered = Boolean(pick.triggered && pick.isArmed && isAboveVwap);
-
-    if(isLiveTriggered){
-      noteCrossing(s.symbol, price, floor);
-      return {
-        state:'GO',
-        reason:(pick.why && pick.triggered)
-          ? pick.why
-          : `Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) VWAP Reversal (Price ₹${price.toFixed(2)} >= VWAP ₹${vwap.toFixed(2)})${pick.ensemble?.score != null ? ' | Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) : ''} | ${pick.p5d}% 5D win rate`,
-        targetPrice,
-        stopPrice,
-        targetPct:currentModelTargetPct(),
-        stopLossPct
-      };
-    }
-    let conditionText = '';
-    if(vwap > 0){
-      const diffPct = ((price - vwap) / vwap) * 100;
-      conditionText = `Price ₹${price.toFixed(2)} < VWAP ₹${vwap.toFixed(2)} (${diffPct.toFixed(2)}%)`;
-    } else {
-      conditionText = `Price ₹${price.toFixed(2)} < VWAP`;
-    }
-    return {
-      state:'WAIT',
-      reason:pick.isArmed
-        ?`Awaiting VWAP reclaim (${conditionText}) · Markov passed: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop)${pick.ensemble?.score != null ? ' [Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) + ']' : ''}`
-        :`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`
-    };
+    const source=BTST.data,sym=normSym(s.symbol);
+    if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
+    const decision=RocketStrategy.memEntryState(source,sym,_universeMap.get(s.symbol),Date.now());
+    if(decision.state!=='GO')return decision;
+    const price=Number(s.price),targetPct=currentModelTargetPct();
+    if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
+    return {...decision,targetPrice:+(price*(1+targetPct/100)).toFixed(2),stopPrice:null,targetPct,stopLossPct:0};
   }
   return {state:'WAIT',reason:'Select a supported native strategy'};
 }
@@ -10466,9 +10405,9 @@ function _renderMethodologyInner(){
     <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from the 09:15 open, any time a fresh score crosses the selected model's floor with a fresh price. Market-trend gates are removed for all models. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
 </section>
     <details id="meth-models" class="meth-detail"><summary>Models, scoring and exits</summary><h3>Live score-crossing engine</h3>
-    <p>The selected model supplies the recommendation table, counts, allocation and basket. Markov / mRMR / Ensemble filters for a green prior week and at least two completed red days with a cumulative drop of at least 3%, applies causal regime-specific mRMR weights, then ranks candidates with the five Ensemble learners. Its default score floor is 1.6 and saturation cap is 2.15. Entry also requires a fresh quote, a green intraday reversal and the VWAP/open anti-chase bands. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
+    <p>The selected model supplies the recommendation table, counts, allocation and basket. Markov / mRMR / Ensemble filters for a green prior week and at least two completed red days with a cumulative drop of at least 3%, applies causal regime-specific mRMR weights, then ranks candidates with the five Ensemble learners. It selects at most five positive Ensemble scores, with an automatic cutoff at the weakest selected score. Regime-specific mRMR weights and the relative cutoff change with the market; no fixed 0.5 floor or saturation cap applies. Fresh price must reclaim session VWAP without exceeding it by 1.5%. Only candidates passing those live checks have numeric recommendation scores. Account, cash and broker checks still apply. Market-wide reference features remain intact; selection is not recalibrated on just five stocks. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
     <div class="m-grid">
-    <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings.</p></div>
+    <div class="m-card"><h4>Combined Ensemble: adaptive top five</h4><p>Five learners (return regressor, target classifier, excess-over-market, downside quantile, extra-trees) trained on causal regime-weighted vectors from up to 220 prior sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend averages their percentile ranks and uses the existing calibrated score scale. Only the five highest strictly positive scores enter the VWAP watchlist; the cutoff follows the current distribution.</p></div>
     <div class="m-card"><h4>CUM - VWAP Trend &amp; Breadth</h4><p>Native ten-second VWAP-gap zero crossing and original positive score below +0.5. A native two-rise trigger is consumed when it fires; only a second rise greater than three times the first passes. Price must be above session VWAP and the 09:15-09:29 opening high after 09:30. The frozen March-selected 200-stock sample needs at least 100 fresh quotes and 50% above their opens. Previous completed stock close must exceed EMA20 &gt; EMA50, and at least 60% of sample prior closes must exceed EMA20. Missing context waits. Shared score allocation, held-add/rebuy rules, fees, liquidity and trailing exits apply, with no minimum or maximum hold. Account replay shows modeled trades using the recorded account snapshot; it is not exact tick or broker performance.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
@@ -12120,7 +12059,7 @@ function dashboardMarketCards(){
     const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'Native strategy';
     add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'}${floorModel()==='CUM'?' · Binary Pass/Fail':''}` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,floorModel()==='CUM'?'Binary trigger rules satisfied':'Markov and mRMR filters plus Ensemble floor');
+    add(2,'NSE',`${go} GO`,floorModel()==='CUM'?'Binary trigger rules satisfied':'Top-five positive Ensemble shortlist with live VWAP confirmation');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
     if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','No minimum hold; no maximum');
@@ -14114,10 +14053,9 @@ function emptyBoardReason(){
     const p=BTST.data?.ensemblePipeline||BTST.rank?.ensemblePipeline;
     const age=Date.now()-Date.parse(p?.asOf);
     if(p?.ok!==true||!(age>=0&&age<=180000))return 'Awaiting fresh Ensemble scores: '+escHtml(p?.reason||'scorer is starting')+'.';
-    const scores=BTST.rank?.ranking||BTST.data?.ranking||[];
-    const floor=btstMinScore(),inBand=scores.filter(r=>Number.isFinite(r[1])&&r[1]>=floor).length;
-    if(!inBand)return 'Scores are ready, but no current candidate is at or above the Ensemble floor ('+floor+').';
-    return inBand+' candidate'+(inBand===1?' is':'s are')+' in the Ensemble buy band, but current execution checks block buying. Use Show ineligible to see why.';
+    const selected=BTST.data?.selection||BTST.rank?.selection;
+    if(!selected?.topSymbols?.length)return 'No positive Ensemble candidates in the current market snapshot.';
+    return 'No executable recommendations: the top-five positive shortlist is waiting for live VWAP, quote or account eligibility. Use Show ineligible to inspect the failed stage.';
   }
   const d=btstToday();
   if(!d)return escHtml(btstWaitReason())+'.';
@@ -14440,10 +14378,10 @@ function renderStatusBar(){
     const age=Date.now()-Date.parse(p?.asOf);
     const ready=p?.ok===true&&age>=0&&age<=180000;
     const labels={starting:'Starting',history:'Loading history',features:'Building indicators',mrmr:'Learning market regimes',training:'Training Ensemble',scoring:'Scoring candidates',ready:'Scores ready',error:'Scores unavailable',stale:'Refreshing scores'};
-    const scores=BTST.rank?.ranking||BTST.data?.ranking||[];
-    const floor=btstMinScore();
-    const buyBand=scores.filter(r=>Number.isFinite(r[1])&&r[1]>=floor).length;
-    const scoreStatus=ready?`Scores ready · ${scores.length} ranked · ${buyBand} in buy band`:labels[p?.state]||'Waiting for scores';
+    const source=BTST.data||BTST.rank,selection=source?.selection;
+    const cutoff=selection?.cutoff;
+    const floorField=document.getElementById('fScoreFloor');if(floorField){floorField.readOnly=true;floorField.value=cutoff??'';}
+    const scoreStatus=ready?`${p.stageCounts?.ensemble??0} scored · ${selection?.topSymbols?.length??0} shortlisted · ${source?.picks?.length??0} VWAP ready${Number.isFinite(cutoff)?' · cutoff +'+cutoff.toFixed(2):''}`:labels[p?.state]||'Waiting for scores';
     bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(p?.reason||'Waiting for current market scores')}">Ensemble: ${escHtml(scoreStatus)}</span>`);
   }
   if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
