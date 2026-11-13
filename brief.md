@@ -1,10 +1,11 @@
-# Active Task: Deployed v1707 / Operational
+# Active Task: Deployed v1708 / Operational
 
-Rocket Scanner v1707 deployed at 2026-11-13 16:20 IST. System operational and in sync with origin/master.
+Rocket Scanner v1708 deployed at 2026-11-13 16:25 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1708:** Complete Original mRMR UI and live VWAP entry wiring in app.js
 - **v1707:** Add Original mRMR 218-indicator pre-launch discovery strategy
 - **v1706:** Use a consistent 30-second combined-model entry freshness limit
 - **v1705:** Align entry quote and depth freshness and preserve exchange session VWAP

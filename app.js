@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 16:20 IST'; // release build date (IST)
-const APP_VERSION=1707;
+const BUILD_TS='2026-11-13 16:25 IST'; // release build date (IST)
+const APP_VERSION=1708;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3743,7 +3743,7 @@ function modelBadgeHtml(model,note=''){
 }
 function enabledModelsLabel(){
   const m = selectedBtstModel();
-  return m==='MARKOV_3PCT'?'Markov / mRMR / Ensemble':(m==='CUM'?'Cumulative Change':m);
+  return m==='MARKOV_3PCT'?'Markov / mRMR / Ensemble':m==='MRMR'?'Original mRMR':(m==='CUM'?'Cumulative Change':m);
 }
 function dualScoreCell(row){
   const act = getRowActionState(row);
@@ -3817,6 +3817,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
+  if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned from how current >=10%+costs rockets looked at their pre-launch base across 218 indicators.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
 }
@@ -4455,7 +4456,7 @@ let _floorPushTimer=null,_floorPushed=null;
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
 function isRankedModel(m){ return false; }   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
 function floorModel(){ return selectedBtstModel(); }
-function scoreFloorStore(model=floorModel()){return model==='CUM'?'rs_cumulative_score_floor':model==='MARKOV_3PCT'?'rs_markov_ensemble_score_floor_v1':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
+function scoreFloorStore(model=floorModel()){return model==='CUM'?'rs_cumulative_score_floor':model==='MARKOV_3PCT'?'rs_markov_ensemble_score_floor_v1':model==='MRMR'?'rs_mrmr_score_floor_v1':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
@@ -4469,11 +4470,11 @@ function initScoreFloorUI(force=false){
     }
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
-    el.value=stored===null?(ranked?'2.1':''):stored;
-    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
+    el.value=stored===null?(model==='MRMR'?'65':ranked?'2.1':''):stored;
+    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':model==='MRMR'?'65':ranked?'2.1':'1.6';el.step=model==='MRMR'?'1':'0.1';
     el.style.width=model==='CUM'?'140px':model==='MARKOV_3PCT'?'110px':'90px';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Ensemble Floor':(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Ensemble Floor':model==='MRMR'?'mRMR Floor':(model==='ENS'?'Ensemble':model)+' Floor';
+    el.title=model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':model==='MRMR'?'Original mRMR score floor (0-100 scale, default 65). Scores current candidates on 218 features learned from pre-launch rocket rewinds (>=10% + costs).':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4844,7 +4845,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov · mRMR · Ensemble',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov · mRMR · Ensemble',MRMR:'Original mRMR',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4854,7 +4855,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['CUM','MARKOV_3PCT'];
+const SELECTABLE_MODELS=['CUM','MARKOV_3PCT','MRMR'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4881,7 +4882,7 @@ function syncSelectedModelFromHelper(){
     rememberModelChoice(model);
     RocketStrategy?.applySelectedModel(model);
     const brandTag=document.querySelector('.brand-tag');
-    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':'CUM - VWAP Trend & Breadth';
+    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Pre-Launch Discovery':'CUM - VWAP Trend & Breadth';
     if(changedModel)initScoreFloorUI(true);
     refreshBtstModelView();
     _strategySyncSignature=model;
@@ -4930,7 +4931,7 @@ function selectedBtstModel(){
 }
 function refreshBtstModelView(){
   _btstRankMemo=null;
-  if(!SORT_EXPLICIT&&(floorModel()==='CUM'||floorModel()==='MARKOV_3PCT')){SCOL='score';SDIR=-1;}
+  if(!SORT_EXPLICIT&&(floorModel()==='CUM'||floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR')){SCOL='score';SDIR=-1;}
   for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
   _dualPlanMemo=null;
   if(ALL.length)applyFilters({preservePage:true});
@@ -5314,6 +5315,34 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const price=Number(s.price),targetPct=currentModelTargetPct();
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
     return {...decision,targetPrice:+(price*(1+targetPct/100)).toFixed(2),stopPrice:null,targetPct,stopLossPct:0};
+  }
+  if(floorModel()==='MRMR'){
+    const source=BTST.data||BTST.rank,sym=normSym(s.symbol);
+    if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
+    if(!source||source.activeModel!=='MRMR'||!source.mrmr?.ok){
+      return {state:'WAIT',reason:source?.mrmr?.reason||'Awaiting Original mRMR pre-launch discovery scores (218 features)'};
+    }
+    const score=btstScoreOf(s.symbol);
+    const floor=Number.isFinite(btstMinScore())?btstMinScore():65;
+    if(!Number.isFinite(score))return {state:'WAIT',reason:'Awaiting mRMR score for '+sym};
+    if(score<floor)return {state:'WAIT',reason:`mRMR score ${score.toFixed(1)} below floor ${floor}`};
+    const quote=RocketStrategy.memQuoteState(sym,_universeMap.get(s.symbol),source?.pickInputs?.[sym],Date.now());
+    if(!quote.ok)return {state:'WAIT',reason:quote.reason};
+    if(!(quote.price>=quote.vwap))return {state:'WAIT',reason:'Waiting for live price at/above session VWAP'};
+    if(quote.price>quote.vwap*(1+(RocketStrategy.CONFIG.MAX_VWAP_EXT_PCT||1.5)/100)){
+      return {state:'WAIT',reason:'Extended more than +'+(RocketStrategy.CONFIG.MAX_VWAP_EXT_PCT||1.5)+'% above session VWAP'};
+    }
+    const price=Number(s.price)||quote.price,targetPct=currentModelTargetPct();
+    return {
+      state:'GO',
+      reason:`Original mRMR score ${score.toFixed(1)} >= ${floor} (${source.mrmr.rocketCount||0} rockets rewound @ >=${(source.mrmr.rocketThresholdPct||10.25).toFixed(2)}%) + live VWAP confirmed`,
+      score,
+      targetPrice:+(price*(1+targetPct/100)).toFixed(2),
+      stopPrice:null,
+      targetPct,
+      stopLossPct:0
+    };
   }
   return {state:'WAIT',reason:'Select a supported native strategy'};
 }
@@ -10982,17 +11011,17 @@ function getClockRunwayRead(row,opts){
 // v1446: the one place a non-order-specific target comes from - the selected model's evolving
 // base target, +3% only as its labelled startup fallback when the tracker has not loaded.
 function currentModelTargetPct(){
-  if(floorModel()==='MARKOV_3PCT') return 1.25 + (executionControls?.targetExtraPct ?? 0);
+  if(floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR') return 1.25 + (executionControls?.targetExtraPct ?? 0);
   const t=learnedBtstTarget(null);
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
-  if(floorModel()==='MARKOV_3PCT') return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:'MARKOV_3PCT',method:'markov_trailing',n:0,through:null};
+  if(floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR') return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:floorModel(),method:'markov_trailing',n:0,through:null};
   return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
 
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
-  if(floorModel()==='MARKOV_3PCT'){
+  if(floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR'){
     const tgt = 1.25 + (executionControls?.targetExtraPct ?? 0);
     return {
       targetPct: tgt,
@@ -11791,7 +11820,7 @@ let _usPlanMemo=null;
 function usPlan(){
   const d=US_FEED.data,cap=usCapital(),fl=usFloor(),pct=typeof getMaxAllocPct==='function'?getMaxAllocPct():100,live=usFeedLive();
   const ibkr=usIbkrPlan();
-  const isTrailing=d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT'].includes(d?.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT'].includes(floorModel()));
+  const isTrailing=d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR'].includes(d?.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT','MRMR'].includes(floorModel()));
   const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
   const trailGap=(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.dynamicTrailGapPct==='function')
     ?RocketStrategy.dynamicTrailGapPct(mlot)
@@ -12017,7 +12046,7 @@ function usRows(){
   if(!d||!d.ok) return [];
   const fl=usFloor(),live=usFeedLive();
   const q=(document.getElementById('fSearch')?.value||'').trim().toUpperCase();
-  const isTrailing=d.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT'].includes(d.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT'].includes(floorModel()));
+  const isTrailing=d.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR'].includes(d.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT','MRMR'].includes(floorModel()));
   const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
   const trailGap=(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.dynamicTrailGapPct==='function')
     ?RocketStrategy.dynamicTrailGapPct(mlot)
@@ -12049,7 +12078,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
+  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Pre-launch rocket rewind across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
@@ -12059,7 +12088,7 @@ function dashboardMarketCards(){
     const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'Native strategy';
     add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'}${floorModel()==='CUM'?' · Binary Pass/Fail':''}` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,floorModel()==='CUM'?'Binary trigger rules satisfied':'Top-five positive Ensemble shortlist with live VWAP confirmation');
+    add(2,'NSE',`${go} GO`,floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor + live VWAP confirmation':'Top-five positive Ensemble shortlist with live VWAP confirmation');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
     if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','No minimum hold; no maximum');
@@ -12073,7 +12102,7 @@ function dashboardMarketCards(){
     add(1,'US',escHtml(stratName),`${d?.ok?d.universe??d.ranking?.length??0:0} scored · ${d?.ranking?.length??0} rows published`);
     const go=d?.ok&&usFeedLive()?(d.ranking||[]).filter(r=>typeof r.eligible==='boolean'?r.eligible:(Number.isFinite(Number(r.score))&&Number(r.score)>=usFloor())).length:0;
     add(2,'US',`${go} GO`,'Suggestions · manual IBKR trades');
-    if(d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT'].includes(d?.model))add(3,'US','RS trailing exit','No minimum hold; no maximum');
+    if(d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR'].includes(d?.model))add(3,'US','RS trailing exit','No minimum hold; no maximum');
     else add(3,'US',signed(Number(d?.rules?.targetPct)||3),'Suggested target · no automated protection');
   }
   return groups.map((rows,i)=>`<div class="st"><div class="st-l">${['Market context','Active Strategy','Qualification','Targets'][i]}</div><div style="font-size:15px;line-height:1.7">${rows.join('')}</div></div>`).join('');
@@ -12118,7 +12147,7 @@ async function loadUsFeed(){
   if(brokerPanel&&!brokerPanel.contains(document.activeElement))brokerPanel.innerHTML=buildUsPositionsPanel();
   try{
     const model=typeof floorModel==='function'?floorModel():'CUM';
-    const useUnified=(model==='CUM'||model==='MARKOV_3PCT');
+    const useUnified=(model==='CUM'||model==='MARKOV_3PCT'||model==='MRMR');
     let d=null;
     if(useUnified){
       try{
@@ -14066,6 +14095,11 @@ function emptyBoardReason(){
     if(!selected?.topSymbols?.length)return 'No positive Ensemble candidates in the current market snapshot.';
     return 'No executable recommendations: the top-five positive shortlist is waiting for live VWAP, quote or account eligibility. Use Show ineligible to inspect the failed stage.';
   }
+  if(floorModel()==='MRMR'){
+    const source=BTST.data||BTST.rank,mrmr=source?.mrmr;
+    if(!mrmr?.ok)return 'Awaiting Original mRMR pre-launch discovery scores: '+escHtml(mrmr?.reason||'218-indicator worker is computing')+'.';
+    return `No executable recommendations: ${mrmr.scoredCount||0} stocks scored across ${mrmr.featureCount||218} features (${mrmr.rocketCount||0} rockets rewound @ >=${(mrmr.rocketThresholdPct||10.25).toFixed(2)}%). Use Show ineligible to inspect scores and live VWAP status.`;
+  }
   const d=btstToday();
   if(!d)return escHtml(btstWaitReason())+'.';
   if(!d.picks.length)return `No current picks: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}.`;
@@ -14392,6 +14426,14 @@ function renderStatusBar(){
     const floorField=document.getElementById('fScoreFloor');if(floorField){floorField.readOnly=true;floorField.value=cutoff??'';}
     const scoreStatus=ready?`${p.stageCounts?.ensemble??0} scored · ${selection?.topSymbols?.length??0} shortlisted · ${source?.picks?.length??0} VWAP ready${Number.isFinite(cutoff)?' · cutoff +'+cutoff.toFixed(2):''}`:labels[p?.state]||'Waiting for scores';
     bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(p?.reason||'Waiting for current market scores')}">Ensemble: ${escHtml(scoreStatus)}</span>`);
+  }
+  if(floorModel()==='MRMR'){
+    const source=BTST.data||BTST.rank,mrmr=source?.mrmr;
+    const age=Date.now()-Date.parse(mrmr?.asOf);
+    const ready=mrmr?.ok===true&&age>=0&&age<=300000;
+    const topStr=(mrmr?.topFeatures||[]).slice(0,5).map(t=>`${t.f}(${(t.w*100).toFixed(1)}%)`).join(', ');
+    const scoreStatus=mrmr?.ok?`${mrmr.scoredCount??0} scored · ${mrmr.rocketCount??0} rockets rewound (>=\u2009${(mrmr.rocketThresholdPct||10.25).toFixed(2)}%) · ${mrmr.featureCount||218} feats · ${mrmr.regime||'neutral'}`:(mrmr?.reason||'Computing 218 features…');
+    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(topStr?'Top mRMR features: '+topStr:(mrmr?.reason||'Original mRMR 218-indicator discovery'))}">mRMR: ${escHtml(scoreStatus)}</span>`);
   }
   if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
