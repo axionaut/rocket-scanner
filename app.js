@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 12:51 IST'; // release build date (IST)
-const APP_VERSION=1700;
+const BUILD_TS='2026-11-13 13:06 IST'; // release build date (IST)
+const APP_VERSION=1701;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4461,11 +4461,11 @@ function initScoreFloorUI(force=false){
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
-    el.value=stored===null?(model==='MARKOV_3PCT'?'0.7':ranked?'2.1':''):stored;
-    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'0.7':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
+    el.value=stored===null?(model==='MARKOV_3PCT'?'0.5':ranked?'2.1':''):stored;
+    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'0.5':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
     el.style.width=model==='CUM'?'140px':model==='MARKOV_3PCT'?'110px':'90px';
     const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Ensemble Floor':(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=model==='MARKOV_3PCT'?'Ensemble committee score after the Markov and mRMR filters. Default 0.7 (regime-adaptive); uncapped above. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    el.title=model==='MARKOV_3PCT'?'Ensemble committee score after the Markov and mRMR filters. Default 0.5 (regime-adaptive); uncapped above. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4955,7 +4955,7 @@ function btstMinScore(){
   if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
   if(floorModel()==='MARKOV_3PCT'){
     const o=btstFloorOverride();
-    return o!==null?o:(btstEngineMinScore()??0.7);
+    return o!==null?o:(btstEngineMinScore()??0.5);
   }
   const r=btstRanking();
   if(r&&r.model!==floorModel())return r.minScore;
@@ -5304,7 +5304,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
       return {state:'WAIT',reason:pipeline?.reason||'Awaiting fresh Markov / mRMR / Ensemble scores'};
     }
     const liveQuote=_universeMap.get(s.symbol),liveAt=Number(liveQuote?.priceAt);
-    if(!Number.isFinite(liveAt)||liveAt<=0||now<liveAt||now-liveAt>45000)return {state:'WAIT',reason:'Awaiting a fresh stock quote for the Ensemble setup'};
+    if(!Number.isFinite(liveAt)||liveAt<=0||now<liveAt||now-liveAt>120000)return {state:'WAIT',reason:'Awaiting a fresh stock quote for the Ensemble setup'};
     const held=getCombinedOpenPositionMap()[s.symbol];
     if(held?.qty>0)return {state:'WAIT',reason:'Markov swing position already active'};
     const sym=normSym(s.symbol);
