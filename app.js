@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 16:54 IST'; // release build date (IST)
-const APP_VERSION=1709;
+const BUILD_TS='2026-11-13 20:40 IST'; // release build date (IST)
+const APP_VERSION=1710;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10446,8 +10446,8 @@ function buildMrmrMethodologyHTML(){
   const src=BTST.data||BTST.rank,m=src?.mrmr;
   if(!m||!m.ok){
     return `<section id="meth-mrmr" style="margin:18px 0;padding:16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px">
-      <h3 style="margin:0 0 8px 0">Original mRMR · 218-Indicator Pre-Launch Discovery</h3>
-      <p style="color:var(--t2);font-size:13.5px;margin:0">Select <b>Original mRMR · Pre-Launch Discovery</b> in the Active Strategy dropdown (or wait a few seconds for the background worker to finish) to view all 218 indicator correlations, redundancies, and learned mRMR weights.</p>
+      <h3 style="margin:0 0 8px 0">Unified mRMR · 218-Indicator Pre-Launch Discovery</h3>
+      <p style="color:var(--t2);font-size:13.5px;margin:0">Select <b>Original mRMR · Pre-Launch Discovery</b> or <b>Markov · mRMR · Ensemble</b> in the Active Strategy dropdown (or wait a few seconds for the background worker to finish) to view all 218 indicator correlations, redundancies, and learned mRMR weights.</p>
     </section>`;
   }
   const feats=Array.isArray(m.allFeatures)&&m.allFeatures.length?m.allFeatures:(m.top10Feats||[]).map(x=>({
@@ -14510,10 +14510,11 @@ function renderStatusBar(){
     const age=Date.now()-Date.parse(p?.asOf);
     const ready=p?.ok===true&&age>=0&&age<=180000;
     const labels={starting:'Starting',history:'Loading history',features:'Building indicators',mrmr:'Learning market regimes',training:'Training Ensemble',scoring:'Scoring candidates',ready:'Scores ready',error:'Scores unavailable',stale:'Refreshing scores'};
-    const source=BTST.data||BTST.rank,selection=source?.selection;
+    const source=BTST.data||BTST.rank,selection=source?.selection,mrmr=source?.mrmr;
     const cutoff=selection?.cutoff;
     const floorField=document.getElementById('fScoreFloor');if(floorField){floorField.readOnly=true;floorField.value=cutoff??'';}
-    const scoreStatus=ready?`${p.stageCounts?.ensemble??0} scored · ${selection?.topSymbols?.length??0} shortlisted · ${source?.picks?.length??0} VWAP ready${Number.isFinite(cutoff)?' · cutoff +'+cutoff.toFixed(2):''}`:labels[p?.state]||'Waiting for scores';
+    const mrmrTag=mrmr?.featureCount?` · mRMR ${mrmr.featureCount}f (${mrmr.rocketCount??0} rockets rewound · ${mrmr.regime||'NEUTRAL'})`:'';
+    const scoreStatus=ready?`${p.stageCounts?.ensemble??0} scored · ${selection?.topSymbols?.length??0} shortlisted · ${source?.picks?.length??0} VWAP ready${Number.isFinite(cutoff)?' · cutoff +'+cutoff.toFixed(2):''}${mrmrTag}`:labels[p?.state]||'Waiting for scores';
     bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(p?.reason||'Waiting for current market scores')}">Ensemble: ${escHtml(scoreStatus)}</span>`);
   }
   if(floorModel()==='MRMR'){
@@ -16115,7 +16116,7 @@ function updateTabCounts(){
   const count=dashboardRows().length;
   if(c0) c0.textContent=count?'('+count+')':'';
   const mrmrCnt=(BTST.data||BTST.rank)?.mrmr?.featureCount||218;
-  if(c1) c1.textContent=floorModel()==='MRMR'?`(${mrmrCnt})`:(RADAR.features.length?'('+RADAR.features.length+')':'');
+  if(c1) c1.textContent=(floorModel()==='MRMR'||floorModel()==='MARKOV_3PCT')?`(${mrmrCnt})`:(RADAR.features.length?'('+RADAR.features.length+')':'');
 }
 
 // ── NSE Direct Fetch ──
