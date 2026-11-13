@@ -1,10 +1,11 @@
-# Active Task: Deployed v1704 / Operational
+# Active Task: Deployed v1705 / Operational
 
-Rocket Scanner v1704 deployed at 2026-11-13 14:39 IST. System operational and in sync with origin/master.
+Rocket Scanner v1705 deployed at 2026-11-13 14:55 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1705:** Align entry quote and depth freshness and preserve exchange session VWAP
 - **v1704:** Show actual failed model stages and keep the active shortlist first
 - **v1703:** Implement adaptive top-five positive Ensemble selection with final VWAP recommendations
 - **v1702:** Clarify WAIT reason: Put Awaiting VWAP reclaim first to avoid UI column truncation

@@ -928,6 +928,22 @@ function bookedSession(session,holdingCosts,tradebook){
   // Relative admission, not a fixed numeric threshold. Deterministic ties keep
   // the shortlist bounded even when several committee scores are identical.
   const MEM_PICK_POLICY = 'mem-top5-positive-vwap-v1';
+  const MEM_QUOTE_TTL_MS = 10000;
+  function memQuoteState(quote,now=Date.now()) {
+    const price=Number(quote?.price),vwap=Number(quote?.vwap),age=now-Number(quote?.priceAt);
+    if(!(price>0))return {state:'WAIT',reason:'Price unavailable; waiting for a live quote'};
+    if(!(vwap>0))return {state:'WAIT',reason:'Exchange session VWAP unavailable; waiting for a verified tick'};
+    if(quote?.priceSource!=='live tick'||!Number.isFinite(age)||age<0)return {state:'WAIT',reason:'Live quote not verified'};
+    if(age>MEM_QUOTE_TTL_MS)return {state:'WAIT',reason:`Quote is ${Math.floor(age/1000)}s old; needs an update (maximum 10s)`};
+    const bookAt=Number(quote?.bookAt),bookAge=now-bookAt;
+    if(!(bookAt>0)||!Number.isFinite(bookAge)||bookAge<0)return {state:'WAIT',reason:'Waiting for a verified live order book'};
+    if(bookAge>MEM_QUOTE_TTL_MS)return {state:'WAIT',reason:`Order book is ${Math.floor(bookAge/1000)}s old; needs an update (maximum 10s)`};
+    const ask=Number(quote?.ask),askQty=Number(quote?.askQty);
+    if(!(ask>0&&askQty>=1))return {state:'WAIT',reason:'No sell offer available in the live order book'};
+    const size=Number(quote?.tickSize),rawCap=price*1.0025,cap=size>0?Math.floor(rawCap/size+1e-9)*size:rawCap;
+    if(ask>cap+1e-9)return {state:'WAIT',reason:`Best offer ₹${ask.toFixed(2)} exceeds entry price cap ₹${cap.toFixed(2)}`};
+    return {state:'READY',reason:'Fresh quote and executable offer verified'};
+  }
   function selectMemCandidates(ranking) {
     const seen=new Set();
     const positive=(ranking||[]).filter(r=>Array.isArray(r)&&typeof r[0]==='string'&&Number.isFinite(r[1])&&r[1]>0)
@@ -941,11 +957,8 @@ function bookedSession(session,holdingCosts,tradebook){
     const p=source.ensemblePipeline,at=Date.parse(p?.asOf),sym=String(symbol||'').toUpperCase();
     if(source.ok!==true||p?.ok!==true||source.session!==nseClock(now).day||!Number.isFinite(at)||now<at||now-at>180000)return {state:'WAIT',reason:'Awaiting fresh combined-model scores'};
     if(!source.selection?.topSymbols?.includes(sym))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting the failed-stage assessment for this stock'};
-    const price=Number(quote?.price),vwap=Number(quote?.vwap),age=now-Number(quote?.priceAt);
-    if(!(price>0))return {state:'WAIT',reason:'Price unavailable; waiting for a live quote'};
-    if(!(vwap>0))return {state:'WAIT',reason:'Session VWAP unavailable; entry cannot be checked'};
-    if(quote?.priceSource!=='live tick'||!Number.isFinite(age)||age<0)return {state:'WAIT',reason:'Live quote not verified'};
-    if(age>120000)return {state:'WAIT',reason:`Quote is ${Math.floor(age/1000)}s old; needs an update (maximum 120s)`};
+    const ready=memQuoteState(quote,now);if(ready.state!=='READY')return ready;
+    const price=Number(quote.price),vwap=Number(quote.vwap);
     if(!nseContinuous(now,sym))return {state:'WAIT',reason:'Outside continuous trading session'};
     if(price<vwap)return {state:'WAIT',reason:`Shortlist #${source.selection.topSymbols.indexOf(sym)+1}: needs +${((vwap/price-1)*100).toFixed(2)}% to reclaim VWAP ₹${vwap.toFixed(2)} (last ₹${price.toFixed(2)})`};
     if(price>vwap*1.015)return {state:'WAIT',reason:'Outside VWAP anti-chase band (+1.5%)'};
@@ -969,7 +982,7 @@ function bookedSession(session,holdingCosts,tradebook){
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
     applySelectedModel,
     entryScoreCapped,
-    MEM_PICK_POLICY,selectMemCandidates,memEntryState,
+    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,
     CUM_REFINEMENT,
     cumRefinementReason,

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 14:39 IST'; // release build date (IST)
-const APP_VERSION=1704;
+const BUILD_TS='2026-11-13 14:55 IST'; // release build date (IST)
+const APP_VERSION=1705;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
