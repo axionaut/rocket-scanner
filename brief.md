@@ -1,10 +1,11 @@
-# Active Task: Deployed v1697 / Operational
+# Active Task: Deployed v1698 / Operational
 
-Rocket Scanner v1697 deployed at 2026-11-13 11:27 IST. System operational and in sync with origin/master.
+Rocket Scanner v1698 deployed at 2026-11-13 11:37 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1698:** Remove obsolete basket export status from UI header strip
 - **v1697:** Retire Replay strip and optimize Auto-Buy execution speed via direct push and 500ms bridge interval
 - **v1696:** Show actual Ensemble readiness and buy-band reasons on empty rankings
 - **v1695:** Deliver Ensemble readiness through push and polling and explain empty buy bands

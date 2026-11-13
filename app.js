@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 11:27 IST'; // release build date (IST)
-const APP_VERSION=1697;
+const BUILD_TS='2026-11-13 11:37 IST'; // release build date (IST)
+const APP_VERSION=1698;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14456,14 +14456,7 @@ function renderStatusBar(){
   let tape='';
   try{tape=compactTapeStatus();}catch(e){}
   if(tape) bits.push(tape);
-  // v1402: say what is actually in the export file. The owner read "last update 14:48" off the
-  // file's timestamp at 15:10 and reasonably concluded the writer was dead - it was idle, because
-  // nothing is GO before the 15:15 final so the content never changed and the file was never
-  // rewritten. State belongs on screen, not inferred from an mtime.
-  try{
-    const b=basketFileStatus();
-    if(b) bits.push(b);
-  }catch(e){}
+  // Basket file status retired: direct bridge execution replaces manual file export
   // Replay display retired per owner request (13 Nov 2026)
   bits.push(`<span id="trigger-pnl" style="display:none"></span>`);
   }
