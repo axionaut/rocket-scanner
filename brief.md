@@ -1,10 +1,11 @@
-# Active Task: Deployed v1705 / Operational
+# Active Task: Deployed v1706 / Operational
 
-Rocket Scanner v1705 deployed at 2026-11-13 14:55 IST. System operational and in sync with origin/master.
+Rocket Scanner v1706 deployed at 2026-11-13 15:11 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1706:** Use a consistent 30-second combined-model entry freshness limit
 - **v1705:** Align entry quote and depth freshness and preserve exchange session VWAP
 - **v1704:** Show actual failed model stages and keep the active shortlist first
 - **v1703:** Implement adaptive top-five positive Ensemble selection with final VWAP recommendations

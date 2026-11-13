@@ -8,7 +8,7 @@
 - Select at most the top five strictly positive Ensemble scores, with deterministic ties. The fifth selected score is an automatic relative cutoff, not an editable fixed 0.5 threshold. Fewer than five positive candidates means a smaller shortlist.
 - Preserve the tested selection order: rank the reference candidate pool, select five, then require fresh live VWAP reclaim and the existing +1.5% VWAP anti-chase band. Do not silently promote the sixth name because a higher-ranked name is waiting.
 - Only live entry-qualified candidates publish numeric recommendation scores. Failed stages remain inspectable with reasons. Shared allocation, broker validation, fees, cash controls, and trailing exits remain authoritative.
-- Combined-model GO requires a verified live price and depth ladder no older than 10 seconds, an available sell offer within the existing IOC price cap, and exchange session VWAP. Page readiness and broker authorization use the same freshness limit; candle-derived VWAP must not replace exchange VWAP on the entry path.
+- Combined-model GO requires a verified live price and depth ladder no older than 30 seconds, an available sell offer within the existing IOC price cap, and exchange session VWAP. Page readiness and broker authorization use the same freshness limit; candle-derived VWAP must not replace exchange VWAP on the entry path.
 - Preserve full-universe market/sector context and the original cross-sectional score calibration. Removing reference stocks from those calculations changes the model; do not claim that pruning alone preserves the tested strategy.
 
 

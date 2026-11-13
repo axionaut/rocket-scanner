@@ -928,16 +928,16 @@ function bookedSession(session,holdingCosts,tradebook){
   // Relative admission, not a fixed numeric threshold. Deterministic ties keep
   // the shortlist bounded even when several committee scores are identical.
   const MEM_PICK_POLICY = 'mem-top5-positive-vwap-v1';
-  const MEM_QUOTE_TTL_MS = 10000;
+  const MEM_QUOTE_TTL_MS = 30000;
   function memQuoteState(quote,now=Date.now()) {
     const price=Number(quote?.price),vwap=Number(quote?.vwap),age=now-Number(quote?.priceAt);
     if(!(price>0))return {state:'WAIT',reason:'Price unavailable; waiting for a live quote'};
     if(!(vwap>0))return {state:'WAIT',reason:'Exchange session VWAP unavailable; waiting for a verified tick'};
     if(quote?.priceSource!=='live tick'||!Number.isFinite(age)||age<0)return {state:'WAIT',reason:'Live quote not verified'};
-    if(age>MEM_QUOTE_TTL_MS)return {state:'WAIT',reason:`Quote is ${Math.floor(age/1000)}s old; needs an update (maximum 10s)`};
+    if(age>MEM_QUOTE_TTL_MS)return {state:'WAIT',reason:`Quote is ${Math.ceil(age/1000)}s old; needs an update (maximum ${MEM_QUOTE_TTL_MS/1000}s)`};
     const bookAt=Number(quote?.bookAt),bookAge=now-bookAt;
     if(!(bookAt>0)||!Number.isFinite(bookAge)||bookAge<0)return {state:'WAIT',reason:'Waiting for a verified live order book'};
-    if(bookAge>MEM_QUOTE_TTL_MS)return {state:'WAIT',reason:`Order book is ${Math.floor(bookAge/1000)}s old; needs an update (maximum 10s)`};
+    if(bookAge>MEM_QUOTE_TTL_MS)return {state:'WAIT',reason:`Order book is ${Math.ceil(bookAge/1000)}s old; needs an update (maximum ${MEM_QUOTE_TTL_MS/1000}s)`};
     const ask=Number(quote?.ask),askQty=Number(quote?.askQty);
     if(!(ask>0&&askQty>=1))return {state:'WAIT',reason:'No sell offer available in the live order book'};
     const size=Number(quote?.tickSize),rawCap=price*1.0025,cap=size>0?Math.floor(rawCap/size+1e-9)*size:rawCap;
