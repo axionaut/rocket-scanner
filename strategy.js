@@ -940,11 +940,14 @@ function bookedSession(session,holdingCosts,tradebook){
     if(source?.rules?.pickPolicy!==MEM_PICK_POLICY)return {state:'WAIT',reason:'Awaiting the adaptive top-five strategy update'};
     const p=source.ensemblePipeline,at=Date.parse(p?.asOf),sym=String(symbol||'').toUpperCase();
     if(source.ok!==true||p?.ok!==true||source.session!==nseClock(now).day||!Number.isFinite(at)||now<at||now-at>180000)return {state:'WAIT',reason:'Awaiting fresh combined-model scores'};
-    if(!source.selection?.topSymbols?.includes(sym))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Outside the top five positive Ensemble candidates'};
+    if(!source.selection?.topSymbols?.includes(sym))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting the failed-stage assessment for this stock'};
     const price=Number(quote?.price),vwap=Number(quote?.vwap),age=now-Number(quote?.priceAt);
-    if(quote?.priceSource!=='live tick'||!Number.isFinite(age)||age<0||age>120000||!(price>0&&vwap>0))return {state:'WAIT',reason:'Awaiting a fresh price and session VWAP'};
+    if(!(price>0))return {state:'WAIT',reason:'Price unavailable; waiting for a live quote'};
+    if(!(vwap>0))return {state:'WAIT',reason:'Session VWAP unavailable; entry cannot be checked'};
+    if(quote?.priceSource!=='live tick'||!Number.isFinite(age)||age<0)return {state:'WAIT',reason:'Live quote not verified'};
+    if(age>120000)return {state:'WAIT',reason:`Quote is ${Math.floor(age/1000)}s old; needs an update (maximum 120s)`};
     if(!nseContinuous(now,sym))return {state:'WAIT',reason:'Outside continuous trading session'};
-    if(price<vwap)return {state:'WAIT',reason:`Awaiting VWAP reclaim (Price ₹${price.toFixed(2)} < VWAP ₹${vwap.toFixed(2)})`};
+    if(price<vwap)return {state:'WAIT',reason:`Shortlist #${source.selection.topSymbols.indexOf(sym)+1}: needs +${((vwap/price-1)*100).toFixed(2)}% to reclaim VWAP ₹${vwap.toFixed(2)} (last ₹${price.toFixed(2)})`};
     if(price>vwap*1.015)return {state:'WAIT',reason:'Outside VWAP anti-chase band (+1.5%)'};
     const pick=source.picks?.find(p=>p.symbol===sym);
     if(!pick?.triggered||!source.ranking?.some(r=>r[0]===sym&&Number.isFinite(r[1])&&r[1]>0))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting current execution eligibility'};

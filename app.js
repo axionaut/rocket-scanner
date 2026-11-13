@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 14:21 IST'; // release build date (IST)
-const APP_VERSION=1703;
+const BUILD_TS='2026-11-13 14:39 IST'; // release build date (IST)
+const APP_VERSION=1704;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12379,6 +12379,15 @@ function sortValueOf(row,key){
 // every model. An explicit Model Score header click sorts the numeric score alone, either direction.
 const STATUS_SORT_RANK={GO:0,WAIT:2,BLOCKED:3};   // ARMED (a WAIT that crossed and is waiting for its upticks) ranks 1
 function compareModelScoreRows(a,b){
+  if(!a._us&&!b._us&&floorModel()==='MARKOV_3PCT'){
+    const top=BTST.data?.selection?.topSymbols||[],ai=top.indexOf(normSym(a.symbol)),bi=top.indexOf(normSym(b.symbol));
+    if((ai>=0)!==(bi>=0))return ai>=0?-1:1;
+    if(ai>=0&&bi>=0){
+      const ag=getRowActionState(a).state==='GO',bg=getRowActionState(b).state==='GO';
+      if(ag!==bg)return ag?-1:1;
+      return ai-bi;
+    }
+  }
   const rank = row => {
     if(row._us) return row.go ? 0 : 2;
     const st = getRowActionState(row);

@@ -1,10 +1,11 @@
-# Active Task: Deployed v1703 / Operational
+# Active Task: Deployed v1704 / Operational
 
-Rocket Scanner v1703 deployed at 2026-11-13 14:21 IST. System operational and in sync with origin/master.
+Rocket Scanner v1704 deployed at 2026-11-13 14:39 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1704:** Show actual failed model stages and keep the active shortlist first
 - **v1703:** Implement adaptive top-five positive Ensemble selection with final VWAP recommendations
 - **v1702:** Clarify WAIT reason: Put Awaiting VWAP reclaim first to avoid UI column truncation
 - **v1701:** Calibrate Markov floor default to 0.5 and expand live quote freshness window to 120s
