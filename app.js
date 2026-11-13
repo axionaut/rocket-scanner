@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 15:11 IST'; // release build date (IST)
-const APP_VERSION=1706;
+const BUILD_TS='2026-11-13 16:20 IST'; // release build date (IST)
+const APP_VERSION=1707;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='MRMR'?'Original mRMR':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;

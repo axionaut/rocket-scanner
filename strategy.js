@@ -974,7 +974,7 @@ function bookedSession(session,holdingCosts,tradebook){
 
   function applySelectedModel(model) {
     const selected=String(model||'CUM').toUpperCase();
-    if(!['CUM','MARKOV_3PCT','ENS','PATH'].includes(selected))throw Error('Unknown selected model');
+    if(!['CUM','MARKOV_3PCT','ENS','PATH','MRMR'].includes(selected))throw Error('Unknown selected model');
     CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;
   }
 
