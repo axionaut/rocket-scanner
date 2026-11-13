@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 16:25 IST'; // release build date (IST)
-const APP_VERSION=1708;
+const BUILD_TS='2026-11-13 16:54 IST'; // release build date (IST)
+const APP_VERSION=1709;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4459,7 +4459,8 @@ function floorModel(){ return selectedBtstModel(); }
 function scoreFloorStore(model=floorModel()){return model==='CUM'?'rs_cumulative_score_floor':model==='MARKOV_3PCT'?'rs_markov_ensemble_score_floor_v1':model==='MRMR'?'rs_mrmr_score_floor_v1':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
-    const el=document.getElementById('fScoreFloor'),model=floorModel();
+    const el=document.getElementById('fScoreFloor'),wrap=document.getElementById('scoreFloorWrap'),model=floorModel();
+    if(wrap)wrap.style.display=model==='CUM'?'none':'';
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     el.readOnly=model==='MARKOV_3PCT';
     if(model==='MARKOV_3PCT'){
@@ -4603,6 +4604,7 @@ async function loadBtstPicks(){
     _dualPlanMemo=null;
     if(ALL.length) applyFilters({preservePage:true});
     try{renderStats();}catch(e){}
+    try{const mw=document.getElementById('meth-mrmr-wrap');if(mw&&document.activeElement?.id!=='mrmrFeatSearch')mw.innerHTML=buildMrmrMethodologyHTML();}catch(e){}
   }catch(e){}finally{loadBtstPicks.busy=false;}
 }
 // v1537: each stock's running score high per model today (engine score_highs_<day>.json, every live run, full
@@ -4645,6 +4647,7 @@ function runPageLivePaint(){
   if(PAGE_LIVE.replan){
     for(const row of ALL){ROW_ACTION_MEMO.delete(row);if(PAGE_LIVE.scoreDirty)setRadarEvidenceScore(row);}
     _dualPlanMemo=null;if(ALL.length)applyFilters({preservePage:true});
+    try{const mw=document.getElementById('meth-mrmr-wrap');if(mw&&document.activeElement?.id!=='mrmrFeatSearch')mw.innerHTML=buildMrmrMethodologyHTML();}catch(e){}
   }else{if(ALL.length)scheduleFilterPaint();renderRankingsPanels();}
   PAGE_LIVE.scoreDirty=false;PAGE_LIVE.replan=false;
   PAGE_LIVE.metrics.paintMs=performance.now()-start;PAGE_LIVE.awaitingDom=true;
@@ -5327,16 +5330,11 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const floor=Number.isFinite(btstMinScore())?btstMinScore():65;
     if(!Number.isFinite(score))return {state:'WAIT',reason:'Awaiting mRMR score for '+sym};
     if(score<floor)return {state:'WAIT',reason:`mRMR score ${score.toFixed(1)} below floor ${floor}`};
-    const quote=RocketStrategy.memQuoteState(sym,_universeMap.get(s.symbol),source?.pickInputs?.[sym],Date.now());
-    if(!quote.ok)return {state:'WAIT',reason:quote.reason};
-    if(!(quote.price>=quote.vwap))return {state:'WAIT',reason:'Waiting for live price at/above session VWAP'};
-    if(quote.price>quote.vwap*(1+(RocketStrategy.CONFIG.MAX_VWAP_EXT_PCT||1.5)/100)){
-      return {state:'WAIT',reason:'Extended more than +'+(RocketStrategy.CONFIG.MAX_VWAP_EXT_PCT||1.5)+'% above session VWAP'};
-    }
-    const price=Number(s.price)||quote.price,targetPct=currentModelTargetPct();
+    const price=Number(s.price),targetPct=currentModelTargetPct();
+    if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
     return {
       state:'GO',
-      reason:`Original mRMR score ${score.toFixed(1)} >= ${floor} (${source.mrmr.rocketCount||0} rockets rewound @ >=${(source.mrmr.rocketThresholdPct||10.25).toFixed(2)}%) + live VWAP confirmed`,
+      reason:`Original mRMR score ${score.toFixed(1)} >= ${floor} (${source.mrmr.rocketCount||0} rockets rewound @ >=${(source.mrmr.rocketThresholdPct||10.20).toFixed(2)}%)`,
       score,
       targetPrice:+(price*(1+targetPct/100)).toFixed(2),
       stopPrice:null,
@@ -10425,9 +10423,100 @@ function buildIndicatorWatchHTML(){
     })()}</div>
     <div class="scroll-x"><table class="ct" style="min-width:620px"><thead><tr><th>Indicator</th><th>Prior orientation</th><th title="Mean forward decile gap (mover minus non-mover), normalized; negative vs the rewarded end = backwards">+5% forward gap</th><th>+10% forward gap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
+function mrmrFeatureFamily(f){
+  if(/^(dist_sma|dist_ema|dist_wma|dist_vwma|ema_|sma_)/.test(f))return {label:'Moving Avg',col:'var(--blue)'};
+  if(/vwap/.test(f))return {label:'VWAP / Flow',col:'var(--cyan)'};
+  if(/^(rsi|stoch|williams|cci|macd|roc_|tsi|ultimate|awesome|kst|ppo)/.test(f))return {label:'Momentum',col:'var(--amber)'};
+  if(/^(ret_|log_ret|vel_|acc_|jerk_|price_change|gap_open)/.test(f))return {label:'Returns / Vel',col:'var(--green)'};
+  if(/^(atr|bb_|keltner|donchian|realized_vol|parkinson|garman|rogers|choppiness|efficiency|ulcer|var_ratio|hurst|return_skew|return_kurt|day_range|range_pos|peak_retention|pullback|bounce|intraday_comp)/.test(f))return {label:'Vol / Range',col:'#c084fc'};
+  if(/^(rvol|vol_|up_down_vol|obv|ad_line|cmf|mfi|force_index|eom|pvt|amihud|kyle|daily_rvol)/.test(f))return {label:'Volume / Liq',col:'#38bdf8'};
+  if(/^(body_|upper_wick|lower_wick|clv_|close_to_|consecutive_)/.test(f))return {label:'Candle Action',col:'#f472b6'};
+  return {label:'Multi-Day',col:'#fb923c'};
+}
+function filterMrmrMethodologyTable(){
+  const q=(document.getElementById('mrmrFeatSearch')?.value||'').trim().toLowerCase();
+  const tbody=document.getElementById('mrmrFeatTbody');
+  if(!tbody)return;
+  for(const tr of tbody.children){
+    const txt=tr.dataset.feat||'';
+    tr.style.display=!q||txt.includes(q)?'':'none';
+  }
+}
+function buildMrmrMethodologyHTML(){
+  const src=BTST.data||BTST.rank,m=src?.mrmr;
+  if(!m||!m.ok){
+    return `<section id="meth-mrmr" style="margin:18px 0;padding:16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px">
+      <h3 style="margin:0 0 8px 0">Original mRMR · 218-Indicator Pre-Launch Discovery</h3>
+      <p style="color:var(--t2);font-size:13.5px;margin:0">Select <b>Original mRMR · Pre-Launch Discovery</b> in the Active Strategy dropdown (or wait a few seconds for the background worker to finish) to view all 218 indicator correlations, redundancies, and learned mRMR weights.</p>
+    </section>`;
+  }
+  const feats=Array.isArray(m.allFeatures)&&m.allFeatures.length?m.allFeatures:(m.top10Feats||[]).map(x=>({
+    f:x.feature,accR:x.targetCorr,todayR:x.targetCorr,red:x.redundancy,score:x.mrmrScore,wPct:x.weightPct
+  }));
+  const maxW=feats.reduce((mx,x)=>Math.max(mx,Number(x.wPct)||0),0)||1;
+  const reg=(m.regime||'NEUTRAL').toUpperCase();
+  const regIcon=reg==='BULL'?'🐂':reg==='BEAR'?'🐻':'➡';
+  const regCol=reg==='BULL'?'var(--green)':reg==='BEAR'?'var(--red)':'var(--amber)';
+  const rs=m.regimeSessions||{bull:0,bear:0,neutral:0};
+  const rowsHtml=feats.map((x,idx)=>{
+    const fam=mrmrFeatureFamily(x.f);
+    const accR=Number(x.accR)||0,todayR=Number(x.todayR)||0,red=Number(x.red)||0,sc=Number(x.score)||0,wPct=Number(x.wPct)||0;
+    const dir=accR>=0?'<span style="color:var(--green);font-weight:700">↑ High</span>':'<span style="color:var(--red);font-weight:700">↓ Low</span>';
+    const bw=Math.round((wPct/maxW)*100);
+    const bc=accR>=0?'var(--green)':'var(--red)';
+    return `<tr data-feat="${escHtml((x.f+' '+fam.label).toLowerCase())}">
+      <td style="color:var(--t3);font-family:'DM Mono',monospace;text-align:right">${idx+1}</td>
+      <td style="font-family:'DM Mono',monospace;font-weight:700;color:var(--t1)">${escHtml(x.f)}</td>
+      <td><span style="color:${fam.col};font-size:11px;font-weight:700;text-transform:uppercase">${fam.label}</span></td>
+      <td style="color:${accR>=0?'var(--green)':'var(--red)'};font-weight:700;font-family:'DM Mono',monospace">${accR>=0?'+':''}${accR.toFixed(4)}</td>
+      <td style="color:${todayR>=0?'var(--green)':'var(--red)'};font-family:'DM Mono',monospace;font-size:12px">${todayR>=0?'+':''}${todayR.toFixed(4)}</td>
+      <td>${dir}</td>
+      <td style="font-family:'DM Mono',monospace;color:var(--t2)">${red.toFixed(4)}</td>
+      <td style="font-weight:700;font-family:'DM Mono',monospace;color:var(--t1)">${sc.toFixed(4)}</td>
+      <td class="bar-cell" style="min-width:110px"><div style="background:rgba(255,255,255,.06);border-radius:4px;height:8px;overflow:hidden"><div style="width:${bw}%;height:100%;background:${bc};opacity:.75"></div></div></td>
+      <td style="font-weight:800;font-family:'DM Mono',monospace;color:var(--t1);text-align:right">${wPct.toFixed(2)}%</td>
+    </tr>`;
+  }).join('');
+
+  return `<section id="meth-mrmr" style="margin:18px 0">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:10px">
+      <h3 style="margin:0">Original mRMR · ${m.featureCount||feats.length}-Indicator Pre-Launch Weights</h3>
+      <input id="mrmrFeatSearch" type="text" placeholder="Filter ${feats.length} indicators (e.g. vwap, rsi, atr, rvol)..." oninput="filterMrmrMethodologyTable()" style="width:280px;padding:6px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:13px;outline:none">
+    </div>
+    <div class="regime-bar" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <span style="font-size:15px;font-weight:800;color:${regCol}">${regIcon} ${escHtml(reg)} REGIME</span>
+        <span style="color:var(--t2);font-size:13px">Breadth: <b>${m.breadth??'—'}%</b> advancing · 🚀 <b>${m.rocketCount??0} rockets rewound</b> (&ge;${(m.rocketThresholdPct||10.20).toFixed(2)}%, incl. round-trip costs) · Median pre-launch rewind: <b>${m.medianLookbackBars??0}</b> 1m bars · Scored: <b>${m.scoredCount??0}</b> stocks</span>
+      </div>
+      <div style="font-size:12px;color:var(--t3);font-family:'DM Mono',monospace">
+        Regime sessions: 🐂 ${rs.bull||0} · 🐻 ${rs.bear||0} · ➡ ${rs.neutral||0}
+      </div>
+    </div>
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden;max-height:620px;overflow-y:auto">
+      <table class="ct" style="width:100%">
+        <thead style="position:sticky;top:0;background:var(--bg-card);z-index:2">
+          <tr>
+            <th style="text-align:right;width:42px">#</th>
+            <th>Indicator / Feature</th>
+            <th>Family</th>
+            <th title="Regime-accumulated Pearson correlation with pre-launch rockets">Target r (acc)</th>
+            <th title="Current session pre-launch Pearson correlation">Today r</th>
+            <th title="Whether high or low percentile values are rewarded">Rewarded End</th>
+            <th title="Mean absolute inter-correlation against the other 217 features">Redundancy</th>
+            <th title="|Target r| / (1 + Redundancy)">mRMR Score</th>
+            <th>Relative Weight</th>
+            <th style="text-align:right">Wt%</th>
+          </tr>
+        </thead>
+        <tbody id="mrmrFeatTbody">${rowsHtml}</tbody>
+      </table>
+    </div>
+  </section>`;
+}
 function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
-  mc.innerHTML=`<nav class="meth-nav" aria-label="Methodology sections"><button onclick="scrollToSection('meth-filters')">Filter decisions</button><button onclick="scrollToSection('meth-evidence')">Current evidence</button><button onclick="scrollToSection('meth-rules')">Entry rules</button><button onclick="scrollToSection('meth-models')">Models & exits</button><button onclick="scrollToSection('meth-history')">Older research</button></nav>
+  mc.innerHTML=`<nav class="meth-nav" aria-label="Methodology sections"><button onclick="scrollToSection('meth-mrmr')">mRMR (218 Feats)</button><button onclick="scrollToSection('meth-filters')">Filter decisions</button><button onclick="scrollToSection('meth-evidence')">Current evidence</button><button onclick="scrollToSection('meth-rules')">Entry rules</button><button onclick="scrollToSection('meth-models')">Models & exits</button><button onclick="scrollToSection('meth-history')">Older research</button></nav>
+    <div id="meth-mrmr-wrap">${buildMrmrMethodologyHTML()}</div>
     <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>
     <section id="meth-evidence"><h3>Current evidence</h3><p>Ensemble and PATH use their trained model scores; Cumulative Change records live price movements. Live entries follow the selected binary strategy and shared entry rules. Performance reports recorded account trades and their estimated charges.</p>
 </section>
@@ -12088,7 +12177,7 @@ function dashboardMarketCards(){
     const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'Native strategy';
     add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'}${floorModel()==='CUM'?' · Binary Pass/Fail':''}` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor + live VWAP confirmation':'Top-five positive Ensemble shortlist with live VWAP confirmation');
+    add(2,'NSE',`${go} GO`,floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
     if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','No minimum hold; no maximum');
@@ -16025,7 +16114,8 @@ function updateTabCounts(){
   const c1=document.getElementById('tabCount1');
   const count=dashboardRows().length;
   if(c0) c0.textContent=count?'('+count+')':'';
-  if(c1) c1.textContent=RADAR.features.length?'('+RADAR.features.length+')':'';
+  const mrmrCnt=(BTST.data||BTST.rank)?.mrmr?.featureCount||218;
+  if(c1) c1.textContent=floorModel()==='MRMR'?`(${mrmrCnt})`:(RADAR.features.length?'('+RADAR.features.length+')':'');
 }
 
 // ── NSE Direct Fetch ──
