@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 09:47 IST'; // release build date (IST)
-const APP_VERSION=1696;
+const BUILD_TS='2026-11-13 11:27 IST'; // release build date (IST)
+const APP_VERSION=1697;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4673,6 +4673,7 @@ function startPageLiveStream(){
       if(event.type==='replay')return;
       if(event.type==='changed'){
         if(data.versions?.portfolio){_helperPortfolioRev=Number(data.versions.portfolio);_seenPortfolioRev=_helperPortfolioRev;}
+        if((data.names||[]).includes('auto')){setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),0);}
         queuePageLiveReads(data.names||[]);return;
       }
       if(event.type==='pulse')return;
@@ -4772,30 +4773,9 @@ function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
 let TRIGGER_PNL_HTML='',RULE_REPLAY=null;
 function acceptRuleReplay(r){if(!r)return;if(RULE_REPLAY?.ok&&!Number.isFinite(r.asOf))return;if(Number.isFinite(RULE_REPLAY?.asOf)&&Number.isFinite(r.asOf)&&r.asOf<RULE_REPLAY.asOf)return;RULE_REPLAY=r;updateTriggerPnl(ALL);}
 function updateTriggerPnl(rows){
-  const r=RULE_REPLAY,el=document.getElementById('trigger-pnl');
-  if(!r?.ok)TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="'+escHtml(r?.error||'Waiting for the account snapshot')+'">Account replay: '+(r?.error?'unavailable':'starting')+'</span>';
-  else if(r.policy!=='live-account-rules-v2')TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="The helper must load the shared score allocation and actual-account replay policy.">Replay update pending helper reload</span>';
-  else{
-    const startedD=new Date(r.startedAt);
-    const isToday=startedD.toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})===getSessionDate();
-    const sinceTime=startedD.toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
-    const since=isToday?sinceTime:`${startedD.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',day:'numeric',month:'short'})} ${sinceTime}`;
-    const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2),tone=r.netRs>0?'green':r.netRs<0?'red':'t3';
-    const title='Starts from real available cash and existing holdings. Invested holdings cannot fund another entry. Shared score-proportional allocation, cost floor, liquidity caps, IOC price cap and RS exits. Net includes estimated charges and open liquidation costs. Recording begins at '+since+' IST; earlier trading is not invented. Broker fills may differ from recorded quote execution. No real orders.';
-    const osData=typeof PROFIT_LOCK_STATUS==='object'?PROFIT_LOCK_STATUS?.opportunitySwap:null;
-    const osBadge=osData?.swapsToday?.length>0
-      ?` &middot; <span style="color:var(--accent,#38bdf8);font-weight:600" title="Opportunity Swaps today: ${escHtml(osData.swapsToday.map(s=>(s.sacrificeSym||s.sacrifice)+' -> '+(s.buyerSym||s.buyer)).join(', '))}">&#9889; ${osData.swapsToday.length} Swap${osData.swapsToday.length>1?'s':''}</span>`
-      :'';
-    if(!isToday){
-      const todayNet=Number(r.today?.netRs??r.today?.realizedNetRs??0);
-      const todaySign=(todayNet>0?'+':todayNet<0?'-':'')+Math.abs(todayNet).toFixed(2);
-      const todayTone=todayNet>0?'green':todayNet<0?'red':'t3';
-      TRIGGER_PNL_HTML=`<span style="white-space:nowrap" title="${escHtml(title)}"><span style="color:var(--${todayTone});font-weight:600">Replay Today: &#8377;${todaySign}</span> <span style="color:var(--t3)">&middot;</span> <span style="color:var(--${tone})">Since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)</span><span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new &middot; ${r.open} open${osBadge}</span></span>`;
-    }else{
-      TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Account replay since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new entries &middot; ${r.open} open${osBadge}</span></span>`;
-    }
-  }
-  if(el)el.innerHTML=TRIGGER_PNL_HTML;
+  TRIGGER_PNL_HTML='';
+  const el=document.getElementById('trigger-pnl');
+  if(el){el.innerHTML='';el.style.display='none';}
 }
 
 function btstToday(){
@@ -14484,8 +14464,8 @@ function renderStatusBar(){
     const b=basketFileStatus();
     if(b) bits.push(b);
   }catch(e){}
-  if(!TRIGGER_PNL_HTML)updateTriggerPnl(ALL);
-  bits.push(`<span id="trigger-pnl">${TRIGGER_PNL_HTML}</span>`);
+  // Replay display retired per owner request (13 Nov 2026)
+  bits.push(`<span id="trigger-pnl" style="display:none"></span>`);
   }
   el.innerHTML=bits.join(' <span style="color:var(--t3)">|</span> ');
   updateIneligibleToggle();
@@ -14870,9 +14850,9 @@ function startStreamRefresh(){
   // v1512: a background tab's timers are throttled to about once a minute (16 Oct HBLENGINE/SOLARA expired unclaimed).
   // A worker's timer is not, so its 2 s tick drives the claim; the plain interval stays as the fallback.
   if(!startStreamRefresh.nativeEntry){
-    startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),2000);
+    startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),500);
     try{
-      const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),2000)'],{type:'text/javascript'})));
+      const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),500)'],{type:'text/javascript'})));
       w.onmessage=()=>{if(!document.hidden)return;try{hiddenEntryBeat();}catch(e){console.warn('Hidden entry beat',e);}syncNativeKiteEntries().catch(()=>{});};
       startStreamRefresh.nativeWorker=w;
     }catch(e){}
@@ -15649,8 +15629,9 @@ let _lastSavedBasketOrders = null;   // v1609: what Zerodha_Basket_Buy.json hold
 let _lastBasketSyncError = null;
 let _autoBasketTimer = null;
 
-function scheduleAutoSyncBasket(delayMs = 300){
+function scheduleAutoSyncBasket(delayMs = 0){
   if(_autoBasketTimer) clearTimeout(_autoBasketTimer);
+  if(delayMs <= 0) { flushAutoSyncBasket(); return; }
   _autoBasketTimer = setTimeout(flushAutoSyncBasket, delayMs);
 }
 function flushAutoSyncBasket(){
