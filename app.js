@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 13:06 IST'; // release build date (IST)
-const APP_VERSION=1701;
+const BUILD_TS='2026-11-13 13:25 IST'; // release build date (IST)
+const APP_VERSION=1702;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5372,7 +5372,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     return {
       state:'WAIT',
       reason:pick.isArmed
-        ?`Arming: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop). Awaiting VWAP reclaim (${conditionText})${pick.ensemble?.score != null ? ' [Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) + ']' : ''}`
+        ?`Awaiting VWAP reclaim (${conditionText}) · Markov passed: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop)${pick.ensemble?.score != null ? ' [Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) + ']' : ''}`
         :`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`
     };
   }

@@ -1,10 +1,11 @@
-# Active Task: Deployed v1701 / Operational
+# Active Task: Deployed v1702 / Operational
 
-Rocket Scanner v1701 deployed at 2026-11-13 13:06 IST. System operational and in sync with origin/master.
+Rocket Scanner v1702 deployed at 2026-11-13 13:25 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1702:** Clarify WAIT reason: Put Awaiting VWAP reclaim first to avoid UI column truncation
 - **v1701:** Calibrate Markov floor default to 0.5 and expand live quote freshness window to 120s
 - **v1700:** Calibrate Markov-Ensemble: Retire 2.15 saturation cap, anchor intraday trigger to VWAP reclaim, and set 0.7 adaptive floor
 - **v1699:** Remove open ceiling (+3.5%) from Anti-Chase gate, preserving VWAP +1.5% extension check
