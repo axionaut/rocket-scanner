@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 11:48 IST'; // release build date (IST)
-const APP_VERSION=1699;
+const BUILD_TS='2026-11-13 12:51 IST'; // release build date (IST)
+const APP_VERSION=1700;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4461,11 +4461,11 @@ function initScoreFloorUI(force=false){
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
-    el.value=stored===null?(model==='MARKOV_3PCT'?'1.6':ranked?'2.1':''):stored;
-    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'1.6':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
+    el.value=stored===null?(model==='MARKOV_3PCT'?'0.7':ranked?'2.1':''):stored;
+    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'0.7':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
     el.style.width=model==='CUM'?'140px':model==='MARKOV_3PCT'?'110px':'90px';
     const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Ensemble Floor':(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=model==='MARKOV_3PCT'?'Ensemble committee score after the Markov and mRMR filters. Default 1.6; saturation cap 2.15. This rank score is not a win probability. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    el.title=model==='MARKOV_3PCT'?'Ensemble committee score after the Markov and mRMR filters. Default 0.7 (regime-adaptive); uncapped above. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4955,7 +4955,7 @@ function btstMinScore(){
   if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
   if(floorModel()==='MARKOV_3PCT'){
     const o=btstFloorOverride();
-    return o!==null?o:(btstEngineMinScore()??1.6);
+    return o!==null?o:(btstEngineMinScore()??0.7);
   }
   const r=btstRanking();
   if(r&&r.model!==floorModel())return r.minScore;
@@ -5326,12 +5326,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(pick.dropPct != null && pick.dropPct < 3.0){
       return {state:'WAIT',reason:`Markov pullback drop ${pick.dropPct.toFixed(1)}% is below 3.0% threshold`};
     }
-    if(pick.ensemble?.saturated){
-      return {
-        state: 'WAIT',
-        reason: `Ensemble Saturation: Top-decile climactic spike (score ${pick.ensemble.score >= 0 ? '+' : ''}${pick.ensemble.score.toFixed(2)} >= 2.15); awaiting stabilization to prevent buying mid-spike top.`
-      };
-    }
+    // v1700: Saturation cap (2.15) retired per empirical sweep to allow high-momentum breakouts (e.g. AMBER)
     const price=Number(s.price);
     const targetPrice=+(price*(1 + currentModelTargetPct()/100)).toFixed(2);
     const stopLossPct=pick.stopPct||2.8;
@@ -5351,7 +5346,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
         reason: `Anti-Chase: ${s.symbol} extended too far (+${vwapDiff ? vwapDiff + '% vs VWAP' : ''}). Awaiting pullback to VWAP.`
       };
     }
-    const isLiveTriggered = Boolean(pick.triggered && pick.isArmed && !pick.ensemble?.saturated && dayOpen > 0 && price >= dayOpen);
+    const isAboveVwap = vwap > 0 && price >= vwap;
+    const isLiveTriggered = Boolean(pick.triggered && pick.isArmed && isAboveVwap);
 
     if(isLiveTriggered){
       noteCrossing(s.symbol, price, floor);
@@ -5359,7 +5355,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
         state:'GO',
         reason:(pick.why && pick.triggered)
           ? pick.why
-          : `Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) Green Reversal (Price ₹${price.toFixed(2)} >= Open ₹${(dayOpen||price).toFixed(2)})${pick.ensemble?.score != null ? ' | Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) : ''} | ${pick.p5d}% 5D win rate`,
+          : `Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) VWAP Reversal (Price ₹${price.toFixed(2)} >= VWAP ₹${vwap.toFixed(2)})${pick.ensemble?.score != null ? ' | Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) : ''} | ${pick.p5d}% 5D win rate`,
         targetPrice,
         stopPrice,
         targetPct:currentModelTargetPct(),
@@ -5367,16 +5363,16 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
       };
     }
     let conditionText = '';
-    if(dayOpen > 0){
-      const diffPct = ((price - dayOpen) / dayOpen) * 100;
-      conditionText = `Price ₹${price.toFixed(2)} < Open ₹${dayOpen.toFixed(2)} (${diffPct.toFixed(2)}%)`;
+    if(vwap > 0){
+      const diffPct = ((price - vwap) / vwap) * 100;
+      conditionText = `Price ₹${price.toFixed(2)} < VWAP ₹${vwap.toFixed(2)} (${diffPct.toFixed(2)}%)`;
     } else {
-      conditionText = `Price ₹${price.toFixed(2)} < Open`;
+      conditionText = `Price ₹${price.toFixed(2)} < VWAP`;
     }
     return {
       state:'WAIT',
       reason:pick.isArmed
-        ?`Arming: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop). Awaiting intraday reversal (${conditionText})${pick.ensemble?.score != null ? ' [Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) + ']' : ''}`
+        ?`Arming: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop). Awaiting VWAP reclaim (${conditionText})${pick.ensemble?.score != null ? ' [Ens ' + (pick.ensemble.score >= 0 ? '+' : '') + pick.ensemble.score.toFixed(2) + ']' : ''}`
         :`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`
     };
   }
@@ -14119,8 +14115,8 @@ function emptyBoardReason(){
     const age=Date.now()-Date.parse(p?.asOf);
     if(p?.ok!==true||!(age>=0&&age<=180000))return 'Awaiting fresh Ensemble scores: '+escHtml(p?.reason||'scorer is starting')+'.';
     const scores=BTST.rank?.ranking||BTST.data?.ranking||[];
-    const floor=btstMinScore(),inBand=scores.filter(r=>Number.isFinite(r[1])&&r[1]>=floor&&r[1]<2.15).length;
-    if(!inBand)return 'Scores are ready, but no current candidate is in the Ensemble buy band ('+floor+' to below 2.15).';
+    const floor=btstMinScore(),inBand=scores.filter(r=>Number.isFinite(r[1])&&r[1]>=floor).length;
+    if(!inBand)return 'Scores are ready, but no current candidate is at or above the Ensemble floor ('+floor+').';
     return inBand+' candidate'+(inBand===1?' is':'s are')+' in the Ensemble buy band, but current execution checks block buying. Use Show ineligible to see why.';
   }
   const d=btstToday();
@@ -14446,7 +14442,7 @@ function renderStatusBar(){
     const labels={starting:'Starting',history:'Loading history',features:'Building indicators',mrmr:'Learning market regimes',training:'Training Ensemble',scoring:'Scoring candidates',ready:'Scores ready',error:'Scores unavailable',stale:'Refreshing scores'};
     const scores=BTST.rank?.ranking||BTST.data?.ranking||[];
     const floor=btstMinScore();
-    const buyBand=scores.filter(r=>Number.isFinite(r[1])&&r[1]>=floor&&r[1]<2.15).length;
+    const buyBand=scores.filter(r=>Number.isFinite(r[1])&&r[1]>=floor).length;
     const scoreStatus=ready?`Scores ready · ${scores.length} ranked · ${buyBand} in buy band`:labels[p?.state]||'Waiting for scores';
     bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(p?.reason||'Waiting for current market scores')}">Ensemble: ${escHtml(scoreStatus)}</span>`);
   }

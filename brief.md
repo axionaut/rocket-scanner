@@ -1,10 +1,11 @@
-# Active Task: Deployed v1699 / Operational
+# Active Task: Deployed v1700 / Operational
 
-Rocket Scanner v1699 deployed at 2026-11-13 11:48 IST. System operational and in sync with origin/master.
+Rocket Scanner v1700 deployed at 2026-11-13 12:51 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1700:** Calibrate Markov-Ensemble: Retire 2.15 saturation cap, anchor intraday trigger to VWAP reclaim, and set 0.7 adaptive floor
 - **v1699:** Remove open ceiling (+3.5%) from Anti-Chase gate, preserving VWAP +1.5% extension check
 - **v1698:** Remove obsolete basket export status from UI header strip
 - **v1697:** Retire Replay strip and optimize Auto-Buy execution speed via direct push and 500ms bridge interval
