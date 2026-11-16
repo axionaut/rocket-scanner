@@ -1,10 +1,11 @@
-# Active Task: Deployed v1726 / Operational
+# Active Task: Deployed v1727 / Operational
 
-Rocket Scanner v1726 deployed at 2026-11-16 13:19 IST. System operational and in sync with origin/master.
+Rocket Scanner v1727 deployed at 2026-11-16 13:46 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1727:** Relax combined-model per-stock quote/depth TTL from 30s to 900s (aligned with MRMR)
 - **v1726:** Target + % acts as arming hurdle only, arming at breakeven/MLoT trail without tight floor clamp
 - **v1725:** Min/Max position (default Rs 25K/50K) replace Stocks per allocation for normal buys
 - **v1724:** Fix Performance tab to filter by realised exit date and include partial trims, remove Current system pill, and surface live profit-funding trim budget in Booked Today card and status bar

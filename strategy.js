@@ -950,7 +950,9 @@ function bookedSession(session,holdingCosts,tradebook){
   // Relative admission, not a fixed numeric threshold. Deterministic ties keep
   // the shortlist bounded even when several committee scores are identical.
   const MEM_PICK_POLICY = 'mem-top5-positive-vwap-v1';
-  const MEM_QUOTE_TTL_MS = 30000;
+  // 16 Nov 2026 (owner): aligned with MRMR (900s / 15 min) so quiet stocks between trades aren't blocked;
+  // global WebSocket stream health stays guarded at 30s and IOC entry cap still caps execution price.
+  const MEM_QUOTE_TTL_MS = 900000;
   function memQuoteState(quote,now=Date.now()) {
     const price=Number(quote?.price),vwap=Number(quote?.vwap),age=now-Number(quote?.priceAt);
     if(!(price>0))return {state:'WAIT',reason:'Price unavailable; waiting for a live quote'};
