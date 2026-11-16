@@ -1,10 +1,11 @@
-# Active Task: Deployed v1720 / Operational
+# Active Task: Deployed v1721 / Operational
 
-Rocket Scanner v1720 deployed at 2026-11-16 10:46 IST. System operational and in sync with origin/master.
+Rocket Scanner v1721 deployed at 2026-11-16 10:53 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1721:** Prevent profit-funded trim GTT flip-flopping when underwater stock ticks pause >10s
 - **v1720:** Fix operator precedence in maintainLossStops and deploy decoupled Profit-Funded Cash Refill
 - **v1719:** Replace coupled Opportunity Swap with decoupled Profit-Funded Cash Refill (Approach A)
 - **v1718:** Fix Windows EPERM file-lock rename fallback when publishing btst_rank.json in MarkovStrategy and MRMRStrategy
