@@ -1,10 +1,11 @@
-# Active Task: Deployed v1710 / Operational
+# Active Task: Deployed v1711 / Operational
 
-Rocket Scanner v1710 deployed at 2026-11-13 20:40 IST. System operational and in sync with origin/master.
+Rocket Scanner v1711 deployed at 2026-11-16 09:21 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1711:** Fix MRMR Auto-Buy crossings eligibility, anti-chase bypass, and dedicated 65 floor persistence in server.js
 - **v1710:** Replace legacy mRMR in Markov-mRMR-Ensemble with unified 218-indicator Pre-Launch Rewind mRMR module
 - **v1708:** Complete Original mRMR UI and live VWAP entry wiring in app.js
 - **v1707:** Add Original mRMR 218-indicator pre-launch discovery strategy

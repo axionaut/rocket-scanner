@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-13 20:40 IST'; // release build date (IST)
-const APP_VERSION=1710;
+const BUILD_TS='2026-11-16 09:21 IST'; // release build date (IST)
+const APP_VERSION=1711;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4480,7 +4480,7 @@ function initScoreFloorUI(force=false){
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
       if(!d||d.ok===false||floorModel()!==model||epoch!==_scoreFloorEpoch||document.activeElement===el)return;
-      const server=d.minScore==null?'':String(d.minScore);
+      const server=d.minScore==null?(model==='MRMR'?'65':''):String(d.minScore);
       el.value=server;_floorPushed=model+':'+server;
       try{localStorage.setItem(key,server);}catch(e){}
       if(typeof applyFilters==='function')applyFilters();
