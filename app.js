@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 10:01 IST'; // release build date (IST)
-const APP_VERSION=1714;
+const BUILD_TS='2026-11-16 10:08 IST'; // release build date (IST)
+const APP_VERSION=1715;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -15808,20 +15808,6 @@ async function _drainBasketQueue(preferredOrders = null){
     await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy', audit);
     writeOk = true;
 
-    // When an Opportunity Swap is active in the dual plan, sync the sacrifice sell to Zerodha_Basket_Sell.json
-    try {
-      const allocMap = _dualPlanMemo?.val?.alloc || {};
-      const swapItem = Object.values(allocMap).find(a => a && a.isOpportunitySwap && a.sacrifice);
-      if (swapItem && swapItem.sacrifice) {
-        const sac = swapItem.sacrifice;
-        const sellOrders = RocketStrategy.swapSellBasket(sac);
-        saveBasketToScannerUploads(sellOrders, 'Zerodha_Basket_Sell', [{ symbol: sac.symbol, reason: 'opportunity-swap-sacrifice' }]).catch(e => {
-          console.warn('Failed to sync sacrifice sell basket to Zerodha_Basket_Sell:', e);
-        });
-      }
-    } catch(e) {
-      console.warn('Opportunity swap sell basket sync error:', e);
-    }
     recordModelBasketExport(orders);
     recordBtstExportedTargets(orders);
     _lastSavedBasketSig = targetSig;
