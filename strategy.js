@@ -160,9 +160,21 @@
 
   // One allocation decision for the live basket, account replay and strategy tests.
   // Callers provide contemporaneous eligibility/quotes, never a different sizing model.
+  // Owner 16 Nov 2026: rupee position limits replace "Stocks per allocation" for normal allocation buys.
+  // Minimum: no new order smaller than this (cash below it waits). Maximum: a stock's total position
+  // (existing holding + this order) never exceeds it. The count of names follows from cash / limits.
+  // Opportunity-swap buys keep their own funding rules and do not use these limits.
+  function positionLimits(account) {
+    const min=Number(account?.minPositionRs)||0,max=Number(account?.maxPositionRs)||0;
+    if(min<0||max<0||!Number.isFinite(min)||!Number.isFinite(max))throw Error('Position limits must be non-negative rupee amounts');
+    if(max>0&&min>max)throw Error('Minimum position cannot exceed maximum position');
+    return {min,max};
+  }
+
   function planAccountEntries(candidates, account) {
     const maxStocks=account.maxStocks??20;
     if(!Number.isInteger(maxStocks)||maxStocks<1||maxStocks>20)throw Error('Stocks per allocation must be an integer from 1 to 20');
+    const limits=positionLimits(account),inr=v=>'₹'+Math.round(v).toLocaleString('en-IN');
     const cash=Number(account.cash);
     if(!Number.isFinite(cash)||cash<0)throw Error('Recorded available cash is required');
     const capital=Number(account.capital)>0?Math.min(cash,Number(account.capital)):cash;
@@ -183,15 +195,23 @@
       if(!reason&&!(r.score>0&&Number.isFinite(r.score)))reason='A positive executable strategy score is required';
       if(!reason&&!(r.liquidityCap>0))reason='No turnover or order-book depth to enforce the market-impact cap';
       const unit=r.unitDebit??r.price+sumChargeParts(calcZerodhaChargesSplit(r.price,1,false,false,false));
-      const minimum=account.minimumShares?account.minimumShares(r.price,!!r.held,account.mlot):minSharesForStock(r.price,!!r.held,account.mlot),floor=account.orderCharges?minimum*r.price+fees(minimum,r.price):minimum*unit;
-      const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity);
+      const economicMin=account.minimumShares?account.minimumShares(r.price,!!r.held,account.mlot):minSharesForStock(r.price,!!r.held,account.mlot);
+      const positionMin=limits.min>0&&r.price>0?Math.ceil(limits.min/r.price-1e-9):0,minimum=Math.max(economicMin,positionMin);
+      const floor=account.orderCharges?minimum*r.price+fees(minimum,r.price):minimum*unit;
+      const room=limits.max>0?Math.max(0,limits.max-(Number(r.heldValue)||0)):Infinity,roomDebit=room*(unit/r.price);
+      const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity,roomDebit);
       if(!reason&&floor>ceiling+1e-7){
-        reason = spendable < floor
-          ? `Available cash cannot cover the whole-share minimum order (needs ₹${Math.round(floor).toLocaleString('en-IN')})`
-          : `Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum (needs ₹${Math.round(floor).toLocaleString('en-IN')})`;
+        const byPosition=positionMin>=economicMin&&positionMin>0;
+        reason = room<=0||minimum*r.price>room+1e-7
+          ? (r.heldValue>0?`Holding ${inr(r.heldValue)} leaves no room for a ${inr(minimum*r.price)} order under the ${inr(limits.max)} maximum position`:`One whole-share order (${inr(minimum*r.price)}) exceeds the ${inr(limits.max)} maximum position`)
+          : spendable < floor
+          ? (byPosition?`Waiting for cash: ${inr(spendable)} free is below the ${inr(limits.min)} minimum position`:`Available cash cannot cover the whole-share minimum order (needs ${inr(floor)})`)
+          : (byPosition?`Liquidity cap (one normal 5-min bar) cannot cover the ${inr(limits.min)} minimum position`:`Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum (needs ${inr(floor)})`);
       }
       if(!reason&&selected.length>=maxStocks)reason='Stocks per allocation limit reached; higher scores funded first';
-      if(!reason&&reserved+floor>spendable+1e-7)reason=`Cash cannot cover every minimum order (needs ₹${Math.round(floor).toLocaleString('en-IN')}); higher scores funded first`;
+      if(!reason&&reserved+floor>spendable+1e-7)reason=positionMin>=economicMin&&positionMin>0
+        ?`Remaining cash cannot fund another ${inr(limits.min)} minimum position; higher scores funded first`
+        :`Cash cannot cover every minimum order (needs ${inr(floor)}); higher scores funded first`;
       if(reason){reasons[r.symbol]=reason;continue;}
       selected.push({...r,unit,minimum,floor,ceiling});reserved+=floor;
     }
@@ -1000,6 +1020,7 @@ function bookedSession(session,holdingCosts,tradebook){
     quantityWithinBudget,
     minimumAllocationRs,
     planAccountEntries,
+    positionLimits,
     ibkrOrderFee,
     authorizeAccountEntry,
     evaluateOpportunitySwap,

@@ -1,10 +1,11 @@
-# Active Task: Deployed v1724 / Operational
+# Active Task: Deployed v1725 / Operational
 
-Rocket Scanner v1724 deployed at 2026-11-16 11:58 IST. System operational and in sync with origin/master.
+Rocket Scanner v1725 deployed at 2026-11-16 12:53 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1725:** Min/Max position (default Rs 25K/50K) replace Stocks per allocation for normal buys
 - **v1724:** Fix Performance tab to filter by realised exit date and include partial trims, remove Current system pill, and surface live profit-funding trim budget in Booked Today card and status bar
 - **v1723:** Restore 1.25% loss-trim eligibility floor and pause trims when free cash exceeds 2x minimum order
 - **v1722:** Select worst underwater holding strictly by % loss across both prior holdings and same-day positions

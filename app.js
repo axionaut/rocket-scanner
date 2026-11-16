@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 11:58 IST'; // release build date (IST)
-const APP_VERSION=1724;
+const BUILD_TS='2026-11-16 12:53 IST'; // release build date (IST)
+const APP_VERSION=1725;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8058,24 +8058,27 @@ var PROFIT_LOCK_STATUS={bySym:new Map(),at:0};
 let executionControls=null;
 const executionControlDirty=new Set();
 function applyExecutionControls(controls){
-  if(!controls||!Number.isInteger(controls.maxStocks)||!Number.isFinite(controls.targetExtraPct))return;
+  if(!controls||!Number.isInteger(controls.minPositionRs)||!Number.isInteger(controls.maxPositionRs)||!Number.isFinite(controls.targetExtraPct))return;
   const changed=JSON.stringify(executionControls)!==JSON.stringify(controls);
   executionControls=controls;
-  for(const [key,id] of [['targetExtraPct','fTargetExtra'],['maxStocks','fMaxStocks']]){
+  for(const [key,id] of [['targetExtraPct','fTargetExtra'],['minPositionRs','fMinPosition'],['maxPositionRs','fMaxPosition']]){
     const el=document.getElementById(id);if(el&&!executionControlDirty.has(key)&&document.activeElement!==el)el.value=controls[key];
   }
   if(changed){_dualPlanMemo=null;_usPlanMemo=null;if(typeof renderStats==='function')renderStats();}
 }
+// 16 Nov 2026 (owner): Min/Max position (rupees) replace "Stocks per allocation" for normal allocation buys.
 async function saveExecutionControl(key,el){
-  const raw=el.value.trim(),value=Number(raw),valid=raw!==''&&Number.isFinite(value)&&(key==='maxStocks'?Number.isInteger(value)&&value>=1&&value<=20:value>=0&&value<=100);
-  if(!valid){showToast(key==='maxStocks'?'Enter 1-20 stocks per allocation.':'Enter a target addition from 0 to 100%.',5000,true);return;}
+  const raw=el.value.trim(),value=Number(raw),isPos=key==='minPositionRs'||key==='maxPositionRs';
+  const other=key==='minPositionRs'?executionControls?.maxPositionRs:key==='maxPositionRs'?executionControls?.minPositionRs:null;
+  const valid=raw!==''&&Number.isFinite(value)&&(isPos?Number.isInteger(value)&&value>=(key==='maxPositionRs'?1000:0)&&value<=1e8&&(other==null||(key==='minPositionRs'?value<=other:value>=other)):value>=0&&value<=100);
+  if(!valid){showToast(isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100%.',5000,true);return;}
   el.disabled=true;
   try{
     const result=await readHelperResponse('/api/execution-controls',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({[key]:value}),timeout:8000});
     if(!result?.ok)throw Error(result?.why||'Could not save execution control');
     executionControlDirty.delete(key);applyExecutionControls(result.controls);
     if(typeof applyFilters==='function')applyFilters({preservePage:true});
-    showToast(key==='maxStocks'?'Stocks per allocation: '+value:'Target addition: +'+value+' percentage points');
+    showToast(key==='minPositionRs'?'Min position: ₹'+value.toLocaleString('en-IN'):key==='maxPositionRs'?'Max position: ₹'+value.toLocaleString('en-IN'):'Target addition: +'+value+' percentage points');
   }catch(e){showToast('Not saved: '+e.message,6000,true);}finally{el.disabled=false;}
 }
 let lossFundingDirty=false;
@@ -11401,7 +11404,7 @@ function minimumModelQuantity(row,price,maxQty){
 }
 let _dualPlanMemo=null;
 function planDualBasket(rows,capital){
-  const key=[capital,executionControls?.maxStocks,executionControls?.targetExtraPct,BASKET_MODEL_MODE,RECOMMEND_MIN_SCORE,getEffectiveMaxAlloc(),getMinAlloc(),getMaxAllocPct(),BOOK_V,INTRADAY_STORE_V,
+  const key=[capital,executionControls?.minPositionRs,executionControls?.maxPositionRs,executionControls?.targetExtraPct,BASKET_MODEL_MODE,RECOMMEND_MIN_SCORE,getEffectiveMaxAlloc(),getMinAlloc(),getMaxAllocPct(),BOOK_V,INTRADAY_STORE_V,
     Math.floor(Date.now()/1000),
     (rows||[]).map(r=>r.symbol+':'+r.price+':'+r.turnover+':'+r.score+':'+getRowActionState(r).state+':'+EXPORT_EXCLUDED.has(r.symbol)).join(',')].join('|');
   if(_dualPlanMemo?.key===key) return _dualPlanMemo.val;
@@ -11414,14 +11417,13 @@ function _planDualBasketUncached(rows,capital){
   const held=getHeldPositionMap(),cross=crossingStore(),ranking=btstRanking();
   const candidates=(rows||[]).map(r=>{
     const h=held[r.symbol],price=getBuyPrice(r),k=normSym(r.symbol);
-    return {symbol:r.symbol,price,score:Number(btstScoreOf(r.symbol)),held:!!(h?.qty>0),accumulation:!!(h?.qty>0&&h.avg>0&&price<h.avg),
+    return {symbol:r.symbol,price,score:Number(btstScoreOf(r.symbol)),held:!!(h?.qty>0),accumulation:!!(h?.qty>0&&h.avg>0&&price<h.avg),heldValue:h?.qty>0&&price>0?h.qty*price:0,
       triggerAt:Number(cross?.at?.[k]?.firstT||cross?.at?.[k]?.t||Infinity),
       rvol:Number(RocketStrategy.inputs(r).rvol??r.rvol??1),barRs:Number(ranking?.src?.barTurnover?.[k]?.medianRs)||0,
       liquidityCap:getTurnoverAllocationCap(r),unitDebit:price+calcZerodhaCharges(price,1,false,false,false),
       reason:EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null};
   });
-  const maxStocks=executionControls?.maxStocks??20;
-  const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),maxStocks,mlot:getLiveMlotQuantiles()});
+  const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),minPositionRs:executionControls.minPositionRs,maxPositionRs:executionControls.maxPositionRs,mlot:getLiveMlotQuantiles()});
   for(const r of rows||[])if(planned.alloc[r.symbol]){const p=getRowExitPolicy(r);Object.assign(planned.alloc[r.symbol],{tgtPct:p.targetPct,slPct:p.stopPct,alloc:planned.alloc[r.symbol].capital});}
   return {rows:planned.funded.map(symbol=>(rows||[]).find(r=>r.symbol===symbol)),alloc:planned.alloc,reasons:new Map(Object.entries(planned.reasons))};
 }
@@ -11829,7 +11831,7 @@ function usPlan(){
       const impact=Number(r.liquidityCap)>0?Number(r.liquidityCap):(Number(r.turnover20)>0?0.001*Number(r.turnover20):(Number(r.volume)>0?0.001*px*Number(r.volume):50000));
       const sc=Number(r.score);
       return {sym:r.symbol,score:Number.isFinite(sc)?sc:1,px,impact};
-    }).sort((a,b)=>b.score-a.score).slice(0,executionControls.maxStocks):[];
+    }).sort((a,b)=>b.score-a.score).slice(0,20):[];
   const debit=(q,px)=>q*px+usIbkrFee(q,px,false);
   if(cap>0&&go.length){
     const perCap=cap*Math.min(pct,100)/100,W=go.reduce((t,g)=>t+1+Math.max(0,g.score-fl),0);
@@ -15534,7 +15536,7 @@ function buildBasketOrders(capital, selList){
         recommendation:{capturedAt:Date.now(),session:getSessionDate(),score:btstScoreOf(sym),
           scoreAsOf:btstRanking()?.src?.asOf||null,scoreFloor:btstMinScore(),
           scoringModel:btstRanking()?.model||null,scoreA:btstScoreAOf(sym),
-          referencePrice:Number(s.price)||null,allocationPolicy:'score-proportional-v2',maxStocks:executionControls?.maxStocks??20,appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
+          referencePrice:Number(s.price)||null,allocationPolicy:'score-proportional-v2',minPositionRs:executionControls?.minPositionRs,maxPositionRs:executionControls?.maxPositionRs,appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
     });
   };
   // v1398: NO EXPORTED ORDER MAY EXCEED THE CASH BEHIND IT. 17 Sep 15:24 a BUY VENUSPIPES 6,000 @
