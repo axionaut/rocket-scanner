@@ -1,10 +1,11 @@
-# Active Task: Deployed v1729 / Operational
+# Active Task: Deployed v1730 / Operational
 
-Rocket Scanner v1729 deployed at 2026-11-16 15:25 IST. System operational and in sync with origin/master.
+Rocket Scanner v1730 deployed at 2026-11-16 16:26 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1730:** Fix mRMR Methodology rendering and retain computed weights during refresh
 - **v1729:** Complete shared prior-close return mRMR rollout and strategy labels
 - **v1728:** Use prior-close continuous-return mRMR learning consistently across both models
 - **v1727:** Relax combined-model per-stock quote/depth TTL from 30s to 900s (aligned with MRMR)

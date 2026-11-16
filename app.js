@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 15:25 IST'; // release build date (IST)
-const APP_VERSION=1729;
+const BUILD_TS='2026-11-16 16:26 IST'; // release build date (IST)
+const APP_VERSION=1730;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10429,17 +10429,47 @@ function filterMrmrMethodologyTable(){
     tr.style.display=!q||txt.includes(q)?'':'none';
   }
 }
+let MRMR_METHODOLOGY=null;
+let MRMR_METHODOLOGY_LOADING=false;
+let MRMR_METHODOLOGY_ATTEMPT=0;
+function mrmrMethodologySnapshot(){
+  const session=getSessionDate();
+  const snapshots=[BTST.data,BTST.rank,MRMR_METHODOLOGY];
+  return snapshots.filter(source=>source?.session===session&&
+    source.mrmr?.modelVersion==='mrmr-prior-close-return-v2'&&
+    Array.isArray(source.mrmr.allFeatures)&&source.mrmr.allFeatures.length>0)
+    .sort((a,b)=>Date.parse(b.mrmr.asOf||b.asOf)-Date.parse(a.mrmr.asOf||a.asOf))[0]?.mrmr||null;
+}
+async function loadMrmrMethodology(){
+  if(MRMR_METHODOLOGY_LOADING||Date.now()-MRMR_METHODOLOGY_ATTEMPT<6000)return;
+  if(!['MRMR','MARKOV_3PCT'].includes(floorModel()))return;
+  MRMR_METHODOLOGY_LOADING=true;MRMR_METHODOLOGY_ATTEMPT=Date.now();
+  try{
+    const snapshot=await readHelperResponse('/api/inputs/file?name=mrmr_live_snapshot.json',{timeout:6000});
+    if(snapshot?.session!==getSessionDate()||snapshot?.modelVersion!=='mrmr-prior-close-return-v2'||
+       !Array.isArray(snapshot.mrmr?.allFeatures)||!snapshot.mrmr.allFeatures.length)return;
+    MRMR_METHODOLOGY={session:snapshot.session,asOf:snapshot.asOf,mrmr:snapshot.mrmr};
+    const wrapper=document.getElementById('meth-mrmr-wrap');
+    if(wrapper&&document.activeElement?.id!=='mrmrFeatSearch')wrapper.innerHTML=buildMrmrMethodologyHTML();
+  }catch(error){console.warn('mRMR methodology refresh failed',error);}
+  finally{MRMR_METHODOLOGY_LOADING=false;}
+}
 function buildMrmrMethodologyHTML(){
-  const src=BTST.data||BTST.rank,m=src?.mrmr;
-  if(!m||!m.ok){
+  const src=BTST.data||BTST.rank,m=mrmrMethodologySnapshot();
+  if(!m){
+    loadMrmrMethodology();
+    const selected=['MRMR','MARKOV_3PCT'].includes(floorModel());
+    const reason=src?.ensemblePipeline?.reason||src?.mrmr?.reason||'Loading today\'s computed indicator correlations and weights';
     return `<section id="meth-mrmr" style="margin:18px 0;padding:16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px">
-      <h3 style="margin:0 0 8px 0">Unified mRMR · 218-Indicator Prior-Close Return Learning</h3>
-      <p style="color:var(--t2);font-size:13.5px;margin:0">Select <b>Original mRMR · Prior-Close Return Learning</b> or <b>Markov · mRMR · Ensemble</b> in the Active Strategy dropdown (or wait a few seconds for the background worker to finish) to view all 218 indicator correlations, redundancies, and learned mRMR weights.</p>
+      <h3 style="margin:0 0 8px 0">Unified mRMR &middot; Prior-Close Return Learning</h3>
+      <p style="color:var(--t2);font-size:13.5px;margin:0">${selected?escHtml(reason):'Select Original mRMR or Markov / mRMR / Ensemble to view the learned indicator weights.'}</p>
     </section>`;
   }
   const feats=Array.isArray(m.allFeatures)&&m.allFeatures.length?m.allFeatures:(m.top10Feats||[]).map(x=>({
     f:x.feature,accR:x.targetCorr,todayR:x.targetCorr,red:x.redundancy,score:x.mrmrScore,wPct:x.weightPct
   }));
+  const computedAt=Date.parse(m.asOf);
+  const computedTime=Number.isFinite(computedAt)?new Date(computedAt).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' IST':'Unavailable';
   const maxW=feats.reduce((mx,x)=>Math.max(mx,Number(x.wPct)||0),0)||1;
   const reg=(m.regime||'NEUTRAL').toUpperCase();
   const regIcon=reg==='BULL'?'🐂':reg==='BEAR'?'🐻':'➡';
@@ -10475,7 +10505,7 @@ function buildMrmrMethodologyHTML(){
         <span style="color:var(--t2);font-size:13px">Breadth <b>${m.breadth??'Unavailable'}%</b> advancing &middot; Learning <b>${m.learningStocks??0}</b> stocks &middot; Reference <b>previous close</b> &middot; Target <b>actual return today</b> &middot; Scored <b>${m.scoredCount??0}</b> stocks</span>
       </div>
       <div style="font-size:12px;color:var(--t3);font-family:'DM Mono',monospace">
-        Regime sessions: 🐂 ${rs.bull||0} · 🐻 ${rs.bear||0} · ➡ ${rs.neutral||0}
+        Computed ${escHtml(computedTime)} &middot; Prior-close inputs fixed
       </div>
     </div>
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden;max-height:620px;overflow-y:auto">
