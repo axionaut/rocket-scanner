@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 11:40 IST'; // release build date (IST)
-const APP_VERSION=1723;
+const BUILD_TS='2026-11-16 11:58 IST'; // release build date (IST)
+const APP_VERSION=1724;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -168,7 +168,7 @@ function tapeSigOf(key){
   return bars.length+':'+a.t+':'+z.t+':'+z.o+':'+z.h+':'+z.l+':'+z.c+':'+z.v+':'+(_memoryRevisions.get(key)||0);
 }
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
-let PERF_PERIOD_FILTER='btst'; // a PERF_PRESETS key or 'custom'
+let PERF_PERIOD_FILTER='mtd'; // a PERF_PRESETS key or 'custom'
 let PERF_FROM='',PERF_TO=''; // v1499: custom entry-date range (YYYY-MM-DD, both ends included)
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from buildLatestSessionPanel — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
@@ -8103,6 +8103,7 @@ async function loadProfitLockStatus(){
   const changed=day!==RECONCILED_OPENING.day||JSON.stringify(next)!==JSON.stringify(RECONCILED_OPENING.cost);
   RECONCILED_OPENING={day,cost:next};
   if(changed&&typeof renderBooked==='function')try{renderBooked();}catch(e){}
+  try{if(typeof renderStats==='function'&&document.getElementById('statsBar'))renderStats();if(typeof renderStatusBar==='function')renderStatusBar();}catch(e){}
   const mu=j.mlotHistory?.updatedAt;
   if(mu&&typeof MLOT_SESSIONS==="object"&&mu!==MLOT_SESSIONS.updatedAt){
     MLOT_SESSIONS.updatedAt=mu;
@@ -8683,6 +8684,18 @@ function scheduleBalanceGrids(){
   _balanceTimer=setTimeout(balanceGrids,60);   // debounced: resize fires continuously while dragging
 }
 if(typeof window!=='undefined') window.addEventListener('resize',scheduleBalanceGrids,{passive:true});
+function lossBudgetSummary(plk=PROFIT_LOCK_STATUS){
+  const lb=plk?.lossBudget,pool=lb?.pool;
+  if(!lb||!pool)return null;
+  const sharePct=Number.isFinite(lb.fundingShare)?+(lb.fundingShare*100).toFixed(2):80;
+  const avail=Number(lb.available)||0,res=Number(lb.reserved)||0,reserve=Number(lb.reserve)||0;
+  const wins=Number(pool.todayWins)||0,losses=Number(pool.todayLosses)||0,net5=Number(pool.net)||0,baseNet=Number(pool.basePoolNet)||0,priorNet=Number(pool.priorNet)||0;
+  const cutoff=Number(lb.triggerPct);
+  const activeTrims=[...(plk.bySym?.values()||[])].filter(p=>p&&p.lossGttId&&p.lossGttQty>0);
+  const activeText=activeTrims.length?activeTrims.map(p=>`${p.sym} ×${p.lossGttQty}${p.lossGttTrigger>0?' @ ₹'+p.lossGttTrigger:''}`).join(', '):'none armed';
+  const tip=`Profit-funded trim pool (5 sessions, ${sharePct}% share${cutoff>0?`, -${cutoff}% cutoff`:''}):\nPrior net: ${fmtSignedINR(priorNet)} | Today wins: ${fmtSignedINR(wins)} | Base pool: ${fmtSignedINR(baseNet)}\nToday trims used: ${fmtINR(losses)} | Active GTT reserve: ${fmtINR(res)} (${activeText}) | Cushion: ${fmtINR(reserve)}\nRemaining budget: ${fmtINR(avail)}`;
+  return {sharePct,avail,res,reserve,wins,losses,net5,baseNet,priorNet,cutoff,activeTrims,activeText,tip};
+}
 function renderStats(){
   // Active Basket Allocation Card
   const capital = getEffectiveCapital();
@@ -8696,22 +8709,25 @@ function renderStats(){
     <div class="st-d">of ${fmtINR(capital)} capital</div></div>`;
 
   // Booked P&L Card
-  let bookedCard = '';
   const booked = PERF_LATEST_SUMMARY;
-  if(booked){
-    const sessionToday = getSessionDate();
-    const isToday = booked.date === sessionToday;
-    const bookedLabel = isToday ? 'Booked Today' : 'Latest Session';
-    const pnlSummary = summarizeExitPnlRows(booked.rows || []);
-    const grossStr = pnlSummary.known.length ? `gross ${fmtSignedINR(pnlSummary.gross)}` : '';
-    const costStr = pnlSummary.known.length ? `cost ${fmtNegINR(pnlSummary.charges)}` : '';
-    bookedCard = `<div class="st" title="Realized net P&L from executed orders/trades.">
-      <div class="st-l">NSE · ${bookedLabel}</div>
-      <div class="st-v" style="font-size:18px;color:${booked.total >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedINR(booked.total)}</div>
-      <div class="st-d">${booked.date || sessionToday} · ${grossStr} ${costStr}</div></div>`;
-  } else {
-    bookedCard = `<div class="st"><div class="st-l">NSE · Booked Today</div><div class="st-v" style="font-size:18px;color:var(--t3)">₹0.00</div><div class="st-d">No trades closed today</div></div>`;
-  }
+  const sessionToday = getSessionDate();
+  const isToday = booked?.date === sessionToday;
+  const bookedLabel = booked ? (isToday ? 'Booked Today' : 'Latest Session') : 'Booked Today';
+  const pnlSummary = booked ? summarizeExitPnlRows(booked.rows || []) : null;
+  const grossStr = pnlSummary?.known.length ? `gross ${fmtSignedINR(pnlSummary.gross)}` : '';
+  const costStr = pnlSummary?.known.length ? `cost ${fmtNegINR(pnlSummary.charges)}` : '';
+  const bookedVal = booked ? fmtSignedINR(booked.total) : '₹0.00';
+  const bookedClr = booked ? (booked.total >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--t3)';
+  const bookedDateLine = booked ? `${booked.date || sessionToday} · ${grossStr} ${costStr}` : 'No trades closed today';
+  const bSum = lossBudgetSummary();
+  const budgetSub = bSum
+    ? `<div class="st-d" style="margin-top:4px;font-size:11px;line-height:1.35">Wins ${fmtSignedINR(bSum.wins)} · Trims ${bSum.losses>0?fmtSignedINR(-bSum.losses):fmtINR(0)}<br>Trim budget (${bSum.sharePct}%): <span style="color:var(--amber);font-weight:700">${fmtINR(bSum.avail)} left</span>${bSum.res>0?` (${fmtINR(bSum.res)} active GTT)`:''} · 5d net ${fmtSignedINR(bSum.net5)}</div>`
+    : '';
+  const bookedTitle = 'Realized net P&L from executed orders/trades.' + (bSum ? '\n' + bSum.tip : '');
+  const bookedCard = `<div class="st" title="${escHtml(bookedTitle)}">
+    <div class="st-l">NSE · ${bookedLabel}</div>
+    <div class="st-v" style="font-size:18px;color:${bookedClr}">${bookedVal}</div>
+    <div class="st-d">${bookedDateLine}</div>${budgetSub}</div>`;
 
   const mv=marketsShown(),up=usPlan();
   const usAllocCard = `<div class="st" title="Sized from the US Capital $ you entered or imported from the read-only broker panel. Suggest-only: place the orders in IBKR yourself.">
@@ -9652,31 +9668,27 @@ function _tgtRangeTxt(){
     return r? ` · targets ${r.targetMin.toFixed(2)}-${r.targetMax.toFixed(2)}%` : '';
   }catch(e){ return ''; }
 }
-// Display-only cohort; learning history and trading rules are unchanged.
-const BTST_PERFORMANCE_START='2026-09-18';
 function selectPerformanceTrips(trips,period,cutoff,from,to){
-  if(period==='custom') return (trips||[]).filter(r=>(!from||r.buyDate>=from)&&(!to||r.buyDate<=to));
-  return (trips||[]).filter(r=>period==='btst'? !r.shortTrip&&r.buyDate>=BTST_PERFORMANCE_START:!cutoff||r.buyDate>=cutoff);
+  if(period==='custom') return (trips||[]).filter(r=>(!from||r.sellDate>=from)&&(!to||r.sellDate<=to));
+  return (trips||[]).filter(r=>!cutoff||r.sellDate>=cutoff);
 }
-function performanceEntrySummary(trips,openLots){
-  const groups=new Map(),key=(sym,date,time,id)=>normSym(sym)+'|'+date+'|'+(id||String(time||'').replace('T',' '));
-  for(const r of trips){
-    const k=key(r.sym,r.buyDate,r.buyTime,r.buyOrderId)+(r.shortTrip?'|short':''),g=groups.get(k)||{key:k,net:0,dated:!!r.buyTime};
+function performanceEntrySummary(trips){
+  const groups=new Map(),key=r=>normSym(r.sym)+'|'+(r.sellDate||'')+'|'+(r.sellOrderId||String(r.sellTime||'').replace('T',' '));
+  for(const r of trips||[]){
+    const k=key(r)+(r.shortTrip?'|short':''),g=groups.get(k)||{key:k,net:0};
     g.net+=Number(r.netPnl)||0;groups.set(k,g);
   }
-  const open=new Set();
-  for(const [sym,lots] of Object.entries(openLots||{}))for(const lot of lots||[])if(lot.qty>0)open.add(key(sym,lot.date,lot.time,lot.orderId));
-  const closed=[...groups.values()].filter(g=>g.dated&&!open.has(g.key));
+  const closed=[...groups.values()];
   const wins=closed.filter(g=>g.net>0),losses=closed.filter(g=>g.net<0),flat=closed.length-wins.length-losses.length;
   const winSum=wins.reduce((n,g)=>n+g.net,0),lossSum=losses.reduce((n,g)=>n+g.net,0);
-  return {count:closed.length,wins:wins.length,losses:losses.length,flat,excluded:groups.size-closed.length,
+  return {count:closed.length,wins:wins.length,losses:losses.length,flat,excluded:0,
     winRate:closed.length?wins.length/closed.length*100:null,avgWin:wins.length?winSum/wins.length:null,
     avgLoss:losses.length?lossSum/losses.length:null,expectancy:closed.length?(winSum+lossSum)/closed.length:null,
     profitFactor:lossSum<0?winSum/-lossSum:null,noLosses:wins.length>0&&!losses.length};
 }
-// v1499: preset start dates (entry date on or after). Indian financial year starts 1 Apr; quarters are calendar
+// v1499: preset start dates (exit date on or after). Indian financial year starts 1 Apr; quarters are calendar
 // quarters (Jan/Apr/Jul/Oct), which line up with the FY quarters.
-const PERF_PRESETS=[['btst','Current system'],['mtd','This month'],['30d','Last 30 days'],['qtd','This quarter'],
+const PERF_PRESETS=[['mtd','This month'],['30d','Last 30 days'],['qtd','This quarter'],
   ['fytd','This financial year'],['365d','Last 365 days'],['ytd','This year'],['all','All history']];
 function perfPresetStart(p,today){
   const [y,m,d]=String(today).split('-').map(Number),ymd=(Y,M,D)=>{const t=new Date(Date.UTC(Y,M-1,D));return t.toISOString().slice(0,10);};
@@ -9686,9 +9698,9 @@ function perfPresetStart(p,today){
   if(p==='fytd') return m>=4?ymd(y,4,1):ymd(y-1,4,1);
   if(p==='365d') return ymd(y,m,d-365);
   if(p==='ytd') return ymd(y,1,1);
-  return null;   // btst (own start), all, custom
+  return null;   // all, custom
 }
-// v1499: calendar range for the Performance tab. Picking either date switches to a custom range of entry dates;
+// v1499: calendar range for the Performance tab. Picking either date switches to a custom range of exit dates;
 // clicking a preset pill switches back. The inputs show the current period's range so the owner starts from it.
 // v1501: one field. Clicking it opens a month calendar; first click picks the start, second the end (either order).
 const PERF_CAL={open:false,month:'',start:'',from:'',to:''};
@@ -9699,11 +9711,11 @@ function perfFmtDate(s){
 }
 function perfRangePicker(trips){
   const on=PERF_PERIOD_FILTER==='custom';
-  const first=(trips||[]).map(r=>r.buyDate).filter(Boolean).sort()[0]||'';
+  const first=(trips||[]).map(r=>r.sellDate).filter(Boolean).sort()[0]||'';
   PERF_CAL.from=PERF_FROM||first;PERF_CAL.to=PERF_TO||getSessionDate();
   if(!PERF_CAL.month) PERF_CAL.month=PERF_CAL.to.slice(0,7);
   return `<span id="perfRangeWrap" style="position:relative;display:inline-block;margin-left:6px">
-    <button type="button" onclick="togglePerfCal(event)" title="Custom range of entry (buy) dates, both ends included"
+    <button type="button" onclick="togglePerfCal(event)" title="Custom range of realised exit (sell) dates, both ends included"
       style="background:var(--bg);color:${on?'var(--amber)':'var(--t1)'};border:1px solid ${on?'var(--amber)':'var(--border)'};border-radius:20px;padding:4px 12px;font-size:13px;font-weight:600;cursor:pointer">
       &#128197; ${perfFmtDate(PERF_CAL.from)||'start'} &ndash; ${perfFmtDate(PERF_CAL.to)}</button>
     <div id="perfCalPop" onclick="event.stopPropagation()" style="display:${PERF_CAL.open?'block':'none'};position:absolute;z-index:50;top:calc(100% + 6px);left:0;background:var(--bg2,var(--bg));border:1px solid var(--border);border-radius:10px;padding:10px;box-shadow:0 8px 24px rgba(0,0,0,.4)">${PERF_CAL.open?perfCalHtml():''}</div>
@@ -9778,20 +9790,20 @@ function renderPerformance(){
 
   const _cutoff=perfPresetStart(PERF_PERIOD_FILTER,getSessionDate());
   const perfTrips=selectPerformanceTrips(allTripsRaw,PERF_PERIOD_FILTER,_cutoff,PERF_FROM,PERF_TO),p=computePerfStats(perfTrips);
-  const entries=performanceEntrySummary(perfTrips,tb.openPositionLotsMap);
+  const entries=performanceEntrySummary(perfTrips);
   const dates=perfTrips.map(r=>r.sellDate).filter(Boolean).sort();
-  const periodLabel=PERF_PERIOD_FILTER==='custom'?`Entries ${PERF_FROM||'start'} to ${PERF_TO||'today'}`:PERF_PERIOD_FILTER==='btst'?`Entries since ${BTST_PERFORMANCE_START}`:_cutoff?`Entries since ${_cutoff}`:'All recorded history';
+  const periodLabel=PERF_PERIOD_FILTER==='custom'?`Realised exits ${PERF_FROM||'start'} to ${PERF_TO||'today'}`:_cutoff?`Realised exits since ${_cutoff}`:'All recorded history';
   const settledNet=perfTrips.reduce((n,r)=>n+(Number(r.netPnl)||0),0);
   const charges=perfTrips.reduce((n,r)=>n+(Number(r.charges)||0),0),money=v=>v==null?'—':fmtPerfRs(v);
   const dpTotal=perfTrips.reduce((n,r)=>n+(Number(r.dpCharge)||0),0);
   const kpis=[
     {label:'Net realised',value:money(settledNet),color:clr(settledNet),sub:'Tradebook · after charges, excl. DP (Zerodha basis)'},
     {label:'Trading costs',value:fmtINR(charges),color:'var(--t2)',sub:`Estimated, on realised fills · DP ${fmtINR(dpTotal)} billed separately`},
-    {label:'Closed entries',value:entries.count,color:'var(--t1)',sub:'Grouped by buy order; timestamp fallback'+(entries.excluded?` · ${entries.excluded} partial/undated excluded`:'')},
+    {label:'Realised exits',value:entries.count,color:'var(--t1)',sub:'Grouped by sell order · includes partial trims'},
     {label:'Win rate',value:entries.winRate==null?'—':entries.winRate.toFixed(1)+'%',color:'var(--t1)',sub:`${entries.wins} wins · ${entries.losses} losses · ${entries.flat} flat; after charges`},
-    {label:'Avg net / entry',value:money(entries.expectancy),color:entries.expectancy==null?'var(--t3)':clr(entries.expectancy),sub:'Fully closed entries only'},
-    {label:'Average winner',value:money(entries.avgWin),color:'var(--green)',sub:'Net profit per winning entry'},
-    {label:'Average loser',value:money(entries.avgLoss),color:'var(--red)',sub:'Net loss per losing entry'},
+    {label:'Avg net / exit',value:money(entries.expectancy),color:entries.expectancy==null?'var(--t3)':clr(entries.expectancy),sub:'All realised exits in period'},
+    {label:'Average winner',value:money(entries.avgWin),color:'var(--green)',sub:'Net profit per winning exit'},
+    {label:'Average loser',value:money(entries.avgLoss),color:'var(--red)',sub:'Net loss per losing exit (incl. trims)'},
     {label:'Profit factor',value:entries.profitFactor==null?(entries.noLosses?'No losses':'—'):entries.profitFactor.toFixed(2),color:'var(--t1)',sub:'Net winning P&L ÷ absolute net losing P&L'},
     {label:'Realised drawdown',value:perfTrips.length?money(-p.maxDrawdown):'—',color:p.maxDrawdown?'var(--red)':'var(--t2)',sub:'Daily realised P&L only; excludes open losses'},
     {label:'Profitable exit days',value:p.totalTradingDays?p.pctProfitableDays+'%':'—',color:'var(--t1)',sub:`${p.profitableDays} of ${p.totalTradingDays} days with realised exits`},
@@ -9837,7 +9849,7 @@ function renderPerformance(){
   const symbolTrips=new Map();
   for(const r of perfTrips){if(!symbolTrips.has(r.sym))symbolTrips.set(r.sym,[]);symbolTrips.get(r.sym).push(r);}
   const symRows=[...symbolTrips].map(([sym,rows])=>{
-    const e=performanceEntrySummary(rows,tb.openPositionLotsMap);
+    const e=performanceEntrySummary(rows);
     return {sym,netPnl:rows.reduce((n,r)=>n+r.netPnl,0),charges:rows.reduce((n,r)=>n+(Number(r.charges)||0),0),
       entries:e.count,winRate:e.winRate,avgNet:e.expectancy};
   });
@@ -9845,9 +9857,9 @@ function renderPerformance(){
     {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v),clrFn:()=>'var(--t1)',bold:true,totFmt:()=>'<b>TOTAL</b>'},
     {key:'netPnl',label:'Net realised',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr,totFmt:fmtPerfRs,totClrFn:clr},
     {key:'charges',label:'Costs',align:'right',fmt:fmtINR,totFmt:fmtINR},
-    {key:'entries',label:'Closed entries',align:'right',fmt:v=>v,totFmt:v=>v},
+    {key:'entries',label:'Realised exits',align:'right',fmt:v=>v,totFmt:v=>v},
     {key:'winRate',label:'Win rate',align:'right',fmt:v=>v==null?'—':v.toFixed(1)+'%',totFmt:v=>v==null?'—':v.toFixed(1)+'%'},
-    {key:'avgNet',label:'Avg net / entry',align:'right',fmt:money,clrFn:clr,totFmt:money,totClrFn:clr},
+    {key:'avgNet',label:'Avg net / exit',align:'right',fmt:money,clrFn:clr,totFmt:money,totClrFn:clr},
   ];
   const symTotals={sym:'TOTAL',netPnl:settledNet,charges,entries:entries.count,winRate:entries.winRate,avgNet:entries.expectancy};
   const symTbl=makeSortableTable('perf-sym',symCols,symRows,'netPnl',-1,null,symTotals,'sym');
@@ -14420,6 +14432,12 @@ function renderStatusBar(){
   }
   if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
+  const bSum=lossBudgetSummary();
+  if(bSum){
+    const trimCol=bSum.avail>=50?'var(--amber)':bSum.res>0?'var(--cyan)':'var(--t3)';
+    const trimLabel=bSum.activeTrims.length?`✂️ ${escHtml(bSum.activeTrims[0].sym)} ×${bSum.activeTrims[0].lossGttQty} (${fmtINR(bSum.avail)} left)`:`✂️ trim budget ${fmtINR(bSum.avail)}`;
+    bits.push(`<span style="color:${trimCol}" title="${escHtml(bSum.tip)}">${trimLabel}</span>`);
+  }
   let tape='';
   try{tape=compactTapeStatus();}catch(e){}
   if(tape) bits.push(tape);
