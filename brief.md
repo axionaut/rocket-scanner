@@ -1,10 +1,11 @@
-# Active Task: Deployed v1716 / Operational
+# Active Task: Deployed v1717 / Operational
 
-Rocket Scanner v1716 deployed at 2026-11-16 10:12 IST. System operational and in sync with origin/master.
+Rocket Scanner v1717 deployed at 2026-11-16 10:24 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1717:** Remove entryPatternTick from MRMR/MARKOV_3PCT and align executeOpportunitySwap validation with evaluateOpportunitySwap
 - **v1716:** Retire legacy Scanner_Sell basket export, silence skipped/unfilled buy notifications, and fix HTTP 301 redirect in fetch-preopen.js
 - **v1715:** Revert unsolicited Opportunity Swap hurdle change and remove legacy Scanner_Sell basket export
 - **v1714:** Include sell charges in Opportunity Swap share sizing so AVTNPL is not skipped by DP fee rounding

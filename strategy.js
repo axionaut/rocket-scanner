@@ -227,9 +227,6 @@
     }
     if(isSwap){
       if(request.fundingPending||!request.fundingSale)throw Error('Cash unavailable: waiting for sacrifice sell fill');
-      const sale=request.fundingSale;
-      const economics=swapEconomics(Number(request.sacrificeAvgCost),sale.price,sale.qty,request.cap,qty,Number(request.swapTargetPct));
-      if(!economics||economics.buyerPotentialGain+1e-9<economics.lossRs)throw Error('Executable swap target gain no longer covers sacrifice loss');
     }
     return qty;
   }
@@ -311,8 +308,9 @@
       ? Number(buyer.minCapital)
       : Math.max(CONFIG.MIN_ALLOCATION_RS, buyerPx * (buyer.minShares || 1));
 
-    // Deficit calculation against buffered ticket to ensure whole-share viability with charges
-    const targetBudget = Math.max(minTicket * 1.003, buyerPx * 1.003);
+    // Deficit calculation against buffered ticket (incl. +0.25% IOC cap and +0.3% charges allowance) to match executeOpportunitySwap
+    const buyerCap = +(buyerPx * 1.0025).toFixed(2);
+    const targetBudget = Math.max(minTicket * 1.0055, buyerCap * 1.003);
     const deficit = Math.max(0, targetBudget - availableCash);
     if (deficit <= 0) {
       return { eligible: false, buyer, minTicket, availableCash, reason: `Available cash (₹${availableCash.toFixed(0)}) covers minTicket (₹${minTicket.toFixed(0)}); no swap needed` };
@@ -347,11 +345,6 @@
       if (isZombie) hasZombieHoldings = true;
 
       const lossPct = ((avgCost - ltp) / avgCost) * 100;
-      // Skip near-breakeven spread noise (-0.01% to -0.49%)
-      if (lossPct < minLossPct) {
-        continue;
-      }
-
       const dayOpen = Number(h.open || h.dayOpen || 0);
       const dayChg = Number.isFinite(h.dayChg) ? h.dayChg : (dayOpen > 0 ? ((ltp - dayOpen) / dayOpen) * 100 : 0);
 
@@ -361,26 +354,36 @@
         continue;
       }
 
-      // Deficit-aware partial sizing bounded by profit underwriting budget in absolute rupees.
-      // A deep underwater position (e.g. -5% or -10%) is trimmed by part-selling only as many shares
-      // as the absolute rupee loss budget (maxLossRs) allows (or full settledQty if Zombie Capital).
-      const lossPerShare = Math.max(0.01, avgCost - ltp);
-      const maxSharesByLoss = isZombie ? settledQty : Math.floor(maxLossRs / lossPerShare);
-      if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
-
       const sellPrice = typeof options.sellPriceFor==='function' ? Number(options.sellPriceFor(h)) : Number(h.sellPrice||ltp);
       if(!(sellPrice>0&&sellPrice<=ltp))continue;
+
+      // Deficit-aware partial sizing bounded by profit underwriting budget in absolute rupees.
+      const lossPerShare = Math.max(0.01, avgCost - sellPrice);
+      const maxSharesByLoss = maxLossRs > 0 ? Math.floor(maxLossRs / lossPerShare) : (isZombie ? settledQty : 0);
+      if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
+
       const effectiveUsableLtp = sellPrice * usableCreditFactor;
-      const sharesNeeded = Math.ceil(deficit / effectiveUsableLtp);
+      let sharesNeeded = Math.ceil(deficit / effectiveUsableLtp);
+      while (sharesNeeded < settledQty && sharesNeeded < maxSharesByLoss) {
+        const gross = sharesNeeded * sellPrice;
+        const usable = Math.max(0, gross * usableCreditFactor - sumChargeParts(calcZerodhaChargesSplit(sellPrice, sharesNeeded, true, false, false)));
+        const fundedShares = Math.floor((availableCash + usable) / (buyerCap * 1.003));
+        if (fundedShares >= 1 && fundedShares * buyerPx + 1e-9 >= minTicket) break;
+        sharesNeeded++;
+      }
       let sharesToSell = Math.min(settledQty, maxSharesByLoss, sharesNeeded);
       if (sharesToSell <= 0) continue;
 
       // Fee-inclusive underwriting is monotonic in sell quantity. Resize the sacrifice
       // before testing its whole-share replacement; never promise an unfunded ticket.
-      if(!isZombie){
+      if (maxLossRs > 0) {
         let lo=0,hi=sharesToSell;
-        while(lo<hi){const mid=Math.ceil((lo+hi)/2),e=swapEconomics(avgCost,sellPrice,mid,buyerPx,1,targetPct);
-          if(e&&e.lossRs<=maxLossRs+1e-9)lo=mid;else hi=mid-1;}
+        while(lo<hi){
+          const mid=Math.ceil((lo+hi)/2);
+          const e=swapEconomics(avgCost,sellPrice,mid,buyerPx,1,targetPct);
+          const totalLossWithSellFees = e ? (e.lossRs + e.sellFees) : Infinity;
+          if(e && totalLossWithSellFees <= maxLossRs + 1e-9) lo=mid; else hi=mid-1;
+        }
         sharesToSell=lo;
       }
       if(sharesToSell<1)continue;
@@ -388,12 +391,14 @@
       const liberatedUsable=Math.max(0,liberatedGross*usableCreditFactor-
         sumChargeParts(calcZerodhaChargesSplit(sellPrice,sharesToSell,true,false,false)));
       const totalFunding=availableCash+liberatedUsable;
-      const finalBuyerShares=Math.floor(totalFunding/(buyerPx*1.003));
+      const finalBuyerShares=Math.floor(totalFunding/(buyerCap*1.003));
       if(finalBuyerShares<1||finalBuyerShares*buyerPx+1e-9<minTicket)continue;
       const economics=swapEconomics(avgCost,sellPrice,sharesToSell,buyerPx,finalBuyerShares,targetPct);
-      if(!economics||(!isZombie&&economics.lossRs>maxLossRs+1e-9)||
-        economics.buyerPotentialGain+1e-9<economics.lossRs)continue;
+      if(!economics)continue;
+      const totalLossWithFees = economics.lossRs + economics.sellFees;
+      if (maxLossRs > 0 ? (totalLossWithFees > maxLossRs + 1e-9) : (!isZombie || economics.buyerPotentialGain + 1e-9 < economics.lossRs)) continue;
       const {lossRs,buyerPotentialGain}=economics;
+      const totalUnrealizedLossRs = (avgCost - ltp) * settledQty;
       const ler = liberatedUsable / (lossRs || 1);
       sacrifices.push({
         symbol: sym,
@@ -405,9 +410,10 @@
         ltp,
         lossPct,
         lossRs,
+        totalUnrealizedLossRs,
         buyerPotentialGain,
         buyerQty:finalBuyerShares,
-        buyerDebit:finalBuyerShares*buyerPx*1.003,
+        buyerDebit:finalBuyerShares*buyerCap*1.003,
         sellPrice,
         limitPrice:sellPrice,
         isZombie,
@@ -438,8 +444,8 @@
       return { eligible: false, buyer, deficit, minTicket, reason: specificReason };
     }
 
-    // Rank sacrifices strictly by deepest underwater percentage loss first (worst loser trimmed first)
-    sacrifices.sort((a, b) => (b.lossPct - a.lossPct) || (b.lossRs - a.lossRs));
+    // Rank sacrifices by deepest absolute unrealized rupee P&L loss first (then percentage loss)
+    sacrifices.sort((a, b) => (b.totalUnrealizedLossRs - a.totalUnrealizedLossRs) || (b.lossPct - a.lossPct) || (b.lossRs - a.lossRs));
     const chosen = sacrifices[0];
     const trimLabel = chosen.isPartial ? `Trim ${chosen.sharesToSell}/${chosen.qty} sh` : `Sell full ${chosen.sharesToSell} sh`;
     const zombieTag = chosen.isZombie ? ' [Zombie Capital]' : '';
