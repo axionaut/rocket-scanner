@@ -12,6 +12,13 @@
 - Preserve full-universe market/sector context and the original cross-sectional score calibration. Removing reference stocks from those calculations changes the model; do not claim that pruning alone preserves the tested strategy.
 
 
+## Shared mRMR learning - owner, 16 November 2026
+
+- Both Original mRMR and Markov / mRMR / Ensemble use `mrmr-prior-close-return-v2`.
+- Across the full filtered stock universe, correlate each indicator at the previous session close with the actual percentage return from that close to the current price. Include positive, flat and negative returns.
+- Learn continuous Pearson relevance and redundancy on prior-close observations, refresh weights with current returns, and use signed weighted current-universe percentiles for standalone scores.
+- The combined model projects the canonical live indicator weights into its existing Ensemble inputs. Historical training uses prior-close observations and actual subsequent returns known before each training observation. Reject legacy snapshot versions.
+
 ## Mandatory Release Protocol (Release Expert) - 8 November 2026
 
 - **Never manually run `git commit` or `git push` for a release.**

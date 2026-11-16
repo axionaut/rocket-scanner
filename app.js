@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 13:46 IST'; // release build date (IST)
-const APP_VERSION=1727;
+const BUILD_TS='2026-11-16 15:03 IST'; // release build date (IST)
+const APP_VERSION=1728;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3817,7 +3817,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
-  if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned from how current >=10%+costs rockets looked at their pre-launch base across 218 indicators.';
+  if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
 }
@@ -4475,7 +4475,7 @@ function initScoreFloorUI(force=false){
     el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':model==='MRMR'?'65':ranked?'2.1':'1.6';el.step=model==='MRMR'?'1':'0.1';
     el.style.width=model==='CUM'?'140px':model==='MARKOV_3PCT'?'110px':'90px';
     const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Ensemble Floor':model==='MRMR'?'mRMR Floor':(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':model==='MRMR'?'Original mRMR score floor (0-100 scale, default 65). Scores current candidates on 218 features learned from pre-launch rocket rewinds (>=10% + costs).':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    el.title=model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':model==='MRMR'?'Original mRMR score floor (0-100 scale, default 65). Scores current candidates using 218 indicators weighted by prior-close correlations with actual returns today.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4885,7 +4885,7 @@ function syncSelectedModelFromHelper(){
     rememberModelChoice(model);
     RocketStrategy?.applySelectedModel(model);
     const brandTag=document.querySelector('.brand-tag');
-    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Pre-Launch Discovery':'CUM - VWAP Trend & Breadth';
+    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Prior-Close Return Learning':'CUM - VWAP Trend & Breadth';
     if(changedModel)initScoreFloorUI(true);
     refreshBtstModelView();
     _strategySyncSignature=model;
@@ -5324,7 +5324,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
     if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     if(!source||source.activeModel!=='MRMR'||!source.mrmr?.ok){
-      return {state:'WAIT',reason:source?.mrmr?.reason||'Awaiting Original mRMR pre-launch discovery scores (218 features)'};
+      return {state:'WAIT',reason:source?.mrmr?.reason||'Awaiting Original mRMR prior-close return scores (218 features)'};
     }
     const score=btstScoreOf(s.symbol);
     const floor=Number.isFinite(btstMinScore())?btstMinScore():65;
@@ -5334,7 +5334,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
     return {
       state:'GO',
-      reason:`Original mRMR score ${score.toFixed(1)} >= ${floor} (${source.mrmr.rocketCount||0} rockets rewound @ >=${(source.mrmr.rocketThresholdPct||10.20).toFixed(2)}%)`,
+      reason:`Original mRMR score ${score.toFixed(1)} >= ${floor} (${source.mrmr.learningStocks||0} prior-close learning stocks)`,
       score,
       targetPrice:+(price*(1+targetPct/100)).toFixed(2),
       stopPrice:null,
@@ -10433,8 +10433,8 @@ function buildMrmrMethodologyHTML(){
   const src=BTST.data||BTST.rank,m=src?.mrmr;
   if(!m||!m.ok){
     return `<section id="meth-mrmr" style="margin:18px 0;padding:16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px">
-      <h3 style="margin:0 0 8px 0">Unified mRMR · 218-Indicator Pre-Launch Discovery</h3>
-      <p style="color:var(--t2);font-size:13.5px;margin:0">Select <b>Original mRMR · Pre-Launch Discovery</b> or <b>Markov · mRMR · Ensemble</b> in the Active Strategy dropdown (or wait a few seconds for the background worker to finish) to view all 218 indicator correlations, redundancies, and learned mRMR weights.</p>
+      <h3 style="margin:0 0 8px 0">Unified mRMR · 218-Indicator Prior-Close Return Learning</h3>
+      <p style="color:var(--t2);font-size:13.5px;margin:0">Select <b>Original mRMR · Prior-Close Return Learning</b> or <b>Markov · mRMR · Ensemble</b> in the Active Strategy dropdown (or wait a few seconds for the background worker to finish) to view all 218 indicator correlations, redundancies, and learned mRMR weights.</p>
     </section>`;
   }
   const feats=Array.isArray(m.allFeatures)&&m.allFeatures.length?m.allFeatures:(m.top10Feats||[]).map(x=>({
@@ -10444,7 +10444,6 @@ function buildMrmrMethodologyHTML(){
   const reg=(m.regime||'NEUTRAL').toUpperCase();
   const regIcon=reg==='BULL'?'🐂':reg==='BEAR'?'🐻':'➡';
   const regCol=reg==='BULL'?'var(--green)':reg==='BEAR'?'var(--red)':'var(--amber)';
-  const rs=m.regimeSessions||{bull:0,bear:0,neutral:0};
   const rowsHtml=feats.map((x,idx)=>{
     const fam=mrmrFeatureFamily(x.f);
     const accR=Number(x.accR)||0,todayR=Number(x.todayR)||0,red=Number(x.red)||0,sc=Number(x.score)||0,wPct=Number(x.wPct)||0;
@@ -10467,13 +10466,13 @@ function buildMrmrMethodologyHTML(){
 
   return `<section id="meth-mrmr" style="margin:18px 0">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:10px">
-      <h3 style="margin:0">Original mRMR · ${m.featureCount||feats.length}-Indicator Pre-Launch Weights</h3>
+      <h3 style="margin:0">Original mRMR · ${m.featureCount||feats.length}-Indicator Prior-Close Return Weights</h3>
       <input id="mrmrFeatSearch" type="text" placeholder="Filter ${feats.length} indicators (e.g. vwap, rsi, atr, rvol)..." oninput="filterMrmrMethodologyTable()" style="width:280px;padding:6px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:13px;outline:none">
     </div>
     <div class="regime-bar" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         <span style="font-size:15px;font-weight:800;color:${regCol}">${regIcon} ${escHtml(reg)} REGIME</span>
-        <span style="color:var(--t2);font-size:13px">Breadth: <b>${m.breadth??'—'}%</b> advancing · 🚀 <b>${m.rocketCount??0} rockets rewound</b> (&ge;${(m.rocketThresholdPct||10.20).toFixed(2)}%, incl. round-trip costs) · Median pre-launch rewind: <b>${m.medianLookbackBars??0}</b> 1m bars · Scored: <b>${m.scoredCount??0}</b> stocks</span>
+        <span style="color:var(--t2);font-size:13px">Breadth <b>${m.breadth??'Unavailable'}%</b> advancing &middot; Learning <b>${m.learningStocks??0}</b> stocks &middot; Reference <b>previous close</b> &middot; Target <b>actual return today</b> &middot; Scored <b>${m.scoredCount??0}</b> stocks</span>
       </div>
       <div style="font-size:12px;color:var(--t3);font-family:'DM Mono',monospace">
         Regime sessions: 🐂 ${rs.bull||0} · 🐻 ${rs.bear||0} · ➡ ${rs.neutral||0}
@@ -10486,8 +10485,8 @@ function buildMrmrMethodologyHTML(){
             <th style="text-align:right;width:42px">#</th>
             <th>Indicator / Feature</th>
             <th>Family</th>
-            <th title="Regime-accumulated Pearson correlation with pre-launch rockets">Target r (acc)</th>
-            <th title="Current session pre-launch Pearson correlation">Today r</th>
+            <th title="Pearson correlation of prior-close indicators with actual percentage returns today">Target r</th>
+            <th title="Current session continuous-return Pearson correlation">Today r</th>
             <th title="Whether high or low percentile values are rewarded">Rewarded End</th>
             <th title="Mean absolute inter-correlation against the other 217 features">Redundancy</th>
             <th title="|Target r| / (1 + Redundancy)">mRMR Score</th>
@@ -12074,7 +12073,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Pre-launch rocket rewind across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
+  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
@@ -14093,8 +14092,8 @@ function emptyBoardReason(){
   }
   if(floorModel()==='MRMR'){
     const source=BTST.data||BTST.rank,mrmr=source?.mrmr;
-    if(!mrmr?.ok)return 'Awaiting Original mRMR pre-launch discovery scores: '+escHtml(mrmr?.reason||'218-indicator worker is computing')+'.';
-    return `No executable recommendations: ${mrmr.scoredCount||0} stocks scored across ${mrmr.featureCount||218} features (${mrmr.rocketCount||0} rockets rewound @ >=${(mrmr.rocketThresholdPct||10.25).toFixed(2)}%). Use Show ineligible to inspect scores and live VWAP status.`;
+    if(!mrmr?.ok)return 'Awaiting Original mRMR prior-close return scores: '+escHtml(mrmr?.reason||'218-indicator worker is computing')+'.';
+    return `No executable recommendations: ${mrmr.scoredCount||0} stocks scored across ${mrmr.featureCount||218} features (${mrmr.learningStocks||0} prior-close learning stocks). Use Show ineligible to inspect scores and live VWAP status.`;
   }
   const d=btstToday();
   if(!d)return escHtml(btstWaitReason())+'.';
@@ -14420,7 +14419,7 @@ function renderStatusBar(){
     const source=BTST.data||BTST.rank,selection=source?.selection,mrmr=source?.mrmr;
     const cutoff=selection?.cutoff;
     const floorField=document.getElementById('fScoreFloor');if(floorField){floorField.readOnly=true;floorField.value=cutoff??'';}
-    const mrmrTag=mrmr?.featureCount?` · mRMR ${mrmr.featureCount}f (${mrmr.rocketCount??0} rockets rewound · ${mrmr.regime||'NEUTRAL'})`:'';
+    const mrmrTag=mrmr?.featureCount?` | mRMR ${mrmr.featureCount}f (${mrmr.learningStocks??0} learning stocks | ${mrmr.regime||'NEUTRAL'})`:'';
     const scoreStatus=ready?`${p.stageCounts?.ensemble??0} scored · ${selection?.topSymbols?.length??0} shortlisted · ${source?.picks?.length??0} VWAP ready${Number.isFinite(cutoff)?' · cutoff +'+cutoff.toFixed(2):''}${mrmrTag}`:labels[p?.state]||'Waiting for scores';
     bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(p?.reason||'Waiting for current market scores')}">Ensemble: ${escHtml(scoreStatus)}</span>`);
   }
@@ -14429,8 +14428,8 @@ function renderStatusBar(){
     const age=Date.now()-Date.parse(mrmr?.asOf);
     const ready=mrmr?.ok===true&&age>=0&&age<=300000;
     const topStr=(mrmr?.topFeatures||[]).slice(0,5).map(t=>`${t.f}(${(t.w*100).toFixed(1)}%)`).join(', ');
-    const scoreStatus=mrmr?.ok?`${mrmr.scoredCount??0} scored · ${mrmr.rocketCount??0} rockets rewound (>=\u2009${(mrmr.rocketThresholdPct||10.25).toFixed(2)}%) · ${mrmr.featureCount||218} feats · ${mrmr.regime||'neutral'}`:(mrmr?.reason||'Computing 218 features…');
-    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(topStr?'Top mRMR features: '+topStr:(mrmr?.reason||'Original mRMR 218-indicator discovery'))}">mRMR: ${escHtml(scoreStatus)}</span>`);
+    const scoreStatus=mrmr?.ok?`${mrmr.scoredCount??0} scored · ${mrmr.learningStocks??0} prior-close learning stocks · ${mrmr.featureCount||218} feats · ${mrmr.regime||'neutral'}`:(mrmr?.reason||'Computing 218 features…');
+    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(topStr?'Top mRMR features: '+topStr:(mrmr?.reason||'Original mRMR prior-close return learning'))}">mRMR: ${escHtml(scoreStatus)}</span>`);
   }
   if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
