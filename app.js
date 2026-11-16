@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 10:33 IST'; // release build date (IST)
-const APP_VERSION=1718;
+const BUILD_TS='2026-11-16 10:45 IST'; // release build date (IST)
+const APP_VERSION=1719;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5538,35 +5538,6 @@ function rowStatusPillHtml(s){
   // v1581 (owner 28 Oct): one pill and one short line; the full reason is in the tooltip. Crossing and exit
   // detail live in their own columns.
   const label=act.armed?'ARMED':act.state;
-  const allocMap=_dualPlanMemo?.val?.alloc||{};
-  const isSwapFunded=funded&&Boolean(allocMap[s.symbol]?.isOpportunitySwap);
-
-  if(isSwapFunded){
-    const sac=allocMap[s.symbol].sacrifice;
-    const trimLabel=sac?.isPartial?`Trim ${sac.sharesToSell}/${sac.qty} sh`:`Sell ${sac.sharesToSell} sh`;
-    const swapTitle=`Opportunity Swap Active: ${trimLabel} of ${sac.symbol} (-₹${sac.lossRs.toFixed(1)}, -${sac.lossPct.toFixed(2)}%) to liberate ₹${sac.liberatedGross.toFixed(0)} (₹${sac.liberatedUsable.toFixed(0)} usable) to fund ${s.symbol}`;
-    const lineText=`Liberating ₹${Math.round(sac.liberatedUsable)} by trimming ${sac.sharesToSell} sh of ${sac.symbol} (-₹${sac.lossRs.toFixed(0)}, -${sac.lossPct.toFixed(1)}%)`;
-    return `<span class="info-pill pill-green" style="background:rgba(16,185,129,0.22);border:1px solid #10b981;color:#34d399;font-weight:700" title="${escHtml(swapTitle)}">GO | Swap Funded (${sac?.isPartial?'Trim':'Swap'} ${sac?.symbol})</span>`
-      +`<div style="font-size:12px;color:#34d399;cursor:help;font-weight:600" title="${escHtml(swapTitle)}">⚡ ${escHtml(lineText)}</div>`;
-  }
-
-  if(unfunded){
-    const swap=getOpportunitySwapForCandidate(s);
-    if(swap&&swap.eligible&&swap.sacrifice){
-      const sac=swap.sacrifice;
-      const trimLabel=sac.isPartial?`Trim ${sac.sharesToSell}/${sac.qty} sh`:`Sell ${sac.sharesToSell} sh`;
-      const swapTitle=`Opportunity Swap Eligible: ${trimLabel} of ${sac.symbol} (-₹${sac.lossRs.toFixed(1)}, -${sac.lossPct.toFixed(2)}%) to liberate ₹${sac.liberatedGross.toFixed(0)} (₹${sac.liberatedUsable.toFixed(0)} usable) to fund ${s.symbol}`;
-      const lineText=`Liberate ₹${Math.round(sac.liberatedUsable)} by trimming ${sac.sharesToSell} sh of ${sac.symbol} (-₹${sac.lossRs.toFixed(0)}, -${sac.lossPct.toFixed(1)}%)`;
-      return `<span class="info-pill pill-amber" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fbbf24;font-weight:700" title="${escHtml(swapTitle)}">GO | Swap Eligible (${sac.isPartial?'Trim':'Swap'} ${sac.symbol})</span>`
-        +`<div style="font-size:12px;color:#fbbf24;cursor:help;font-weight:600" title="${escHtml(swapTitle)}">⚡ ${escHtml(lineText)}</div>`;
-    }
-    const osNote = (swap && !swap.eligible && swap.reason) ? ` · OS: ${swap.reason}` : '';
-    const full = (act.state==='GO'&&reason ? reason : act.reason) + osNote;
-    const first = String(full||'').split(/(?<=\.)\s/)[0], line = first.length>100 ? first.slice(0,98)+'…' : first;
-    return `<span class="info-pill pill-${act.armed?'amber':tone}" title="${escHtml(full)}">${label} | Not funded</span>`
-      +(line?`<div style="font-size:12px;color:var(--amber)" title="${escHtml(full)}">${escHtml(line)}</div>`:'');
-  }
-
   const full=act.state==='GO'&&reason?reason:act.reason;
   const first=String(full||'').split(/(?<=\.)\s/)[0],line=first.length>90?first.slice(0,88)+'…':first;
   return `<span class="info-pill pill-${act.armed?'amber':tone}" title="${escHtml(full)}">${label}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
@@ -11439,85 +11410,6 @@ function _planDualBasketUncached(rows,capital){
   });
   const maxStocks=executionControls?.maxStocks??20;
   const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),maxStocks,mlot:getLiveMlotQuantiles()});
-
-  // Opportunity Swap: If available cash could not fund maxStocks, check if remaining slots can be funded via Opportunity Swap
-  const slotsRemaining = maxStocks - planned.funded.length;
-  if (slotsRemaining > 0 && typeof RocketStrategy.evaluateOpportunitySwap === 'function') {
-    const unfundedCandidates = candidates.filter(c => {
-      if (planned.funded.includes(c.symbol)) return false;
-      if (c.held) return false;
-      const act = getRowActionState((rows || []).find(r => r.symbol === c.symbol));
-      return act && act.state === 'GO';
-    });
-    if (unfundedCandidates.length) {
-      const heldMap = getCombinedOpenPositionMap();
-      const heldList = Object.values(heldMap).filter(h => h && h.qty > 0 && h.avg > 0).map(h => {
-        const sym = normSym(h.symbol);
-        const plk = PROFIT_LOCK_STATUS?.bySym?.get(sym);
-        const quote = _universeMap?.get(h.symbol);
-        const ltp = Number(plk?.ltp || h.ltp || quote?.price || 0);
-        const avgCost = Number(plk?.avgCost || h.avg || 0);
-        const open = Number(quote?.open || plk?.open || 0);
-        const vwap = Number(quote?.vwap || 0);
-        const dayChg = Number.isFinite(plk?.dayChg) ? plk.dayChg : (open > 0 ? ((ltp - open) / open) * 100 : 0);
-        const settledQty = plk?.settledQty != null ? Number(plk.settledQty) : (plk?.t1 ? 0 : h.qty);
-        const isT1 = Boolean(plk?.t1 || (plk && settledQty <= 0));
-        return {
-          symbol: h.symbol,
-          qty: h.qty,
-          settledQty,
-          t1: isT1,
-          isT1,
-          avgCost,
-          ltp,
-          open,
-          vwap,
-          firstAt: plk?.firstAt || plk?.buyAt || 0,
-      firstSeenDay: plk?.firstSeenDay,
-          dayChg
-        };
-      });
-      const breadthObj = (typeof liveMarketBreadth === 'function') ? liveMarketBreadth() : null;
-      const breadth = (breadthObj?.pct != null) ? (breadthObj.pct / 100) : (breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50);
-      const availableCash = (typeof getKiteAvailableCash === 'function' && getKiteAvailableCash() != null) ? getKiteAvailableCash() : 0;
-      const circuitBroken = Boolean(PROFIT_LOCK_STATUS?.opportunitySwap?.circuitBroken);
-      const profitBudget = Number.isFinite(PROFIT_LOCK_STATUS?.lossBudget?.available) ? PROFIT_LOCK_STATUS.lossBudget.available : 0;
-      const targetPct = 1.25 + (Number(typeof executionControls !== 'undefined' ? executionControls?.targetExtraPct : document.getElementById('fTargetExtra')?.value) || 0);
-
-      const swapEval = RocketStrategy.evaluateOpportunitySwap(unfundedCandidates, heldList, {
-        breadth,
-        availableCash,
-        profitBudget,
-        targetPct,
-        circuitBroken,
-        now: Date.now()
-      });
-
-      if (swapEval && swapEval.eligible && swapEval.buyer && swapEval.sacrifice && Number.isSafeInteger(swapEval.buyerQty) && swapEval.buyerQty > 0 && Number.isFinite(swapEval.buyerDebit) && swapEval.buyerDebit > 0) {
-        const buyer = swapEval.buyer;
-        const sac = swapEval.sacrifice;
-        const swapQty = Number(swapEval.buyerQty);
-        const swapDebit = Number(swapEval.buyerDebit);
-        const swapCap = swapQty * buyer.price;
-        planned.funded.push(buyer.symbol);
-        planned.alloc[buyer.symbol] = {
-          qty: swapQty,
-          capital: swapCap,
-          alloc: swapCap,
-          debit: swapDebit,
-          isOpportunitySwap: true,
-          sacrifice: sac,
-          score: buyer.score,
-          model: floorModel() || 'MARKOV_3PCT'
-        };
-        if (planned.reasons instanceof Map) {
-          planned.reasons.delete(buyer.symbol);
-        } else if (planned.reasons && typeof planned.reasons === 'object') {
-          delete planned.reasons[buyer.symbol];
-        }
-      }
-    }
-  }
   for(const r of rows||[])if(planned.alloc[r.symbol]){const p=getRowExitPolicy(r);Object.assign(planned.alloc[r.symbol],{tgtPct:p.targetPct,slPct:p.stopPct,alloc:planned.alloc[r.symbol].capital});}
   return {rows:planned.funded.map(symbol=>(rows||[]).find(r=>r.symbol===symbol)),alloc:planned.alloc,reasons:new Map(Object.entries(planned.reasons))};
 }

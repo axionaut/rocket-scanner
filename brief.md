@@ -1,10 +1,11 @@
-# Active Task: Deployed v1718 / Operational
+# Active Task: Deployed v1719 / Operational
 
-Rocket Scanner v1718 deployed at 2026-11-16 10:33 IST. System operational and in sync with origin/master.
+Rocket Scanner v1719 deployed at 2026-11-16 10:45 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1719:** Replace coupled Opportunity Swap with decoupled Profit-Funded Cash Refill (Approach A)
 - **v1718:** Fix Windows EPERM file-lock rename fallback when publishing btst_rank.json in MarkovStrategy and MRMRStrategy
 - **v1717:** Remove entryPatternTick from MRMR/MARKOV_3PCT and align executeOpportunitySwap validation with evaluateOpportunitySwap
 - **v1716:** Retire legacy Scanner_Sell basket export, silence skipped/unfilled buy notifications, and fix HTTP 301 redirect in fetch-preopen.js
