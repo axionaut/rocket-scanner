@@ -1,10 +1,11 @@
-# Active Task: Deployed v1722 / Operational
+# Active Task: Deployed v1723 / Operational
 
-Rocket Scanner v1722 deployed at 2026-11-16 11:04 IST. System operational and in sync with origin/master.
+Rocket Scanner v1723 deployed at 2026-11-16 11:40 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1723:** Restore 1.25% loss-trim eligibility floor and pause trims when free cash exceeds 2x minimum order
 - **v1722:** Select worst underwater holding strictly by % loss across both prior holdings and same-day positions
 - **v1721:** Prevent profit-funded trim GTT flip-flopping when underwater stock ticks pause >10s
 - **v1720:** Fix operator precedence in maintainLossStops and deploy decoupled Profit-Funded Cash Refill
