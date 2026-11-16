@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 10:08 IST'; // release build date (IST)
-const APP_VERSION=1715;
+const BUILD_TS='2026-11-16 10:12 IST'; // release build date (IST)
+const APP_VERSION=1716;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -15922,38 +15922,10 @@ async function syncNativeKiteEntries(){
   }catch(e){reportKiteBasketOutcome(false,'Immediate Auto-Buy: '+e.message,'BUY','native-entry');}
   finally{_nativeEntryBusy=false;}
 }
-// The helper writes Zerodha_Basket_Sell.json when a profit-lock stop is hit (it cannot place API orders
-// without a static IP). Mirror it into Scanner_Sell on every 20 s poll; an empty file empties the basket.
+// Manual Scanner_Sell basket export retired: all sells/swaps execute directly via GTT/bridge path.
 let _kiteSellSent=null,_kiteSellBusy=false;
 async function syncSellBasketToKite(){
-  if(_kiteSellBusy||_kiteTransferBusy||!KITE_API) return;
-  const list=await readHelperResponse('/api/inputs/file?name=Zerodha_Basket_Sell.json',{timeout:6000}).catch(()=>null);
-  if(!Array.isArray(list)) return;
-  const sig=list.map(o=>o?.instrument?.tradingsymbol+':'+o?.params?.quantity+'@'+(o?.params?.price||0)).sort().join('|');
-  if(sig===_kiteSellSent) return;
-  if(!list.length && _kiteSellSent === null){
-    _kiteSellSent = sig;
-    return;
-  }
-  _kiteSellBusy=true;
-  try{
-    const r=await kiteBridgeRequest(list,'SELL');
-    if(!r.ok) throw new Error(r.why||'Kite did not confirm Scanner_Sell.');
-    _kiteSellSent=sig;
-    if(list.length){
-      const names=list.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity+(o.params.orderType==='LIMIT'?' @'+o.params.price:'')).join(', ');
-      reportKiteBasketOutcome(true,`SELL ${names} ${r.already?'already in':'written to'} Scanner_Sell. Open Scanner_Sell in Kite and Execute.`,'SELL');
-      showToast(`<strong>Scanner_Sell ready:</strong> ${escHtml(names)}. Open it in Kite and Execute.`,10000,true);
-    }
-  }catch(e){
-    const msg = String(e?.message||e);
-    if(msg.includes('already running')){
-      setTimeout(syncSellBasketToKite, 3000);
-    } else {
-      if(!list.length) _kiteSellSent = sig;
-      reportKiteBasketOutcome(false,'Scanner_Sell: '+msg,'SELL');
-    }
-  }finally{_kiteSellBusy=false;}
+  return;
 }
 async function sendBasketToKite(automatic=false){
   if(filledBasketCleanupEvents().some(e=>!_kiteCleanedFills.has(e.key))){
