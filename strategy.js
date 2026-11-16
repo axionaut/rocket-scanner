@@ -227,9 +227,6 @@
     }
     if(isSwap){
       if(request.fundingPending||!request.fundingSale)throw Error('Cash unavailable: waiting for sacrifice sell fill');
-      const sale=request.fundingSale;
-      const economics=swapEconomics(Number(request.sacrificeAvgCost),sale.price,sale.qty,request.cap,qty,Number(request.swapTargetPct));
-      if(!economics||economics.buyerPotentialGain+1e-9<economics.lossRs)throw Error('Executable swap target gain no longer covers sacrifice loss');
     }
     return qty;
   }
@@ -347,11 +344,6 @@
       if (isZombie) hasZombieHoldings = true;
 
       const lossPct = ((avgCost - ltp) / avgCost) * 100;
-      // Skip near-breakeven spread noise (-0.01% to -0.49%)
-      if (lossPct < minLossPct) {
-        continue;
-      }
-
       const dayOpen = Number(h.open || h.dayOpen || 0);
       const dayChg = Number.isFinite(h.dayChg) ? h.dayChg : (dayOpen > 0 ? ((ltp - dayOpen) / dayOpen) * 100 : 0);
 
@@ -362,10 +354,10 @@
       }
 
       // Deficit-aware partial sizing bounded by profit underwriting budget in absolute rupees.
-      // A deep underwater position (e.g. -5% or -10%) is trimmed by part-selling only as many shares
-      // as the absolute rupee loss budget (maxLossRs) allows (or full settledQty if Zombie Capital).
+      // A deep underwater position (e.g. AVTNPL -₹4,689 or COMSYN -₹3,736) is trimmed by part-selling
+      // only as many shares as the absolute rupee loss budget (maxLossRs) allows (or Zombie fallback when maxLossRs === 0).
       const lossPerShare = Math.max(0.01, avgCost - ltp);
-      const maxSharesByLoss = isZombie ? settledQty : Math.floor(maxLossRs / lossPerShare);
+      const maxSharesByLoss = maxLossRs > 0 ? Math.floor(maxLossRs / lossPerShare) : (isZombie ? settledQty : 0);
       if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
 
       const sellPrice = typeof options.sellPriceFor==='function' ? Number(options.sellPriceFor(h)) : Number(h.sellPrice||ltp);
@@ -377,7 +369,7 @@
 
       // Fee-inclusive underwriting is monotonic in sell quantity. Resize the sacrifice
       // before testing its whole-share replacement; never promise an unfunded ticket.
-      if(!isZombie){
+      if (maxLossRs > 0) {
         let lo=0,hi=sharesToSell;
         while(lo<hi){const mid=Math.ceil((lo+hi)/2),e=swapEconomics(avgCost,sellPrice,mid,buyerPx,1,targetPct);
           if(e&&e.lossRs<=maxLossRs+1e-9)lo=mid;else hi=mid-1;}
@@ -391,9 +383,12 @@
       const finalBuyerShares=Math.floor(totalFunding/(buyerPx*1.003));
       if(finalBuyerShares<1||finalBuyerShares*buyerPx+1e-9<minTicket)continue;
       const economics=swapEconomics(avgCost,sellPrice,sharesToSell,buyerPx,finalBuyerShares,targetPct);
-      if(!economics||(!isZombie&&economics.lossRs>maxLossRs+1e-9)||
-        economics.buyerPotentialGain+1e-9<economics.lossRs)continue;
+      if(!economics)continue;
+      // Absolute P&L underwriting: if maxLossRs > 0 covers economics.lossRs, it is directly underwritten by banked profit.
+      // Only when maxLossRs === 0 (zero banked profit Zombie fallback) must buyerPotentialGain cover lossRs.
+      if (maxLossRs > 0 ? (economics.lossRs > maxLossRs + 1e-9) : (!isZombie || economics.buyerPotentialGain + 1e-9 < economics.lossRs)) continue;
       const {lossRs,buyerPotentialGain}=economics;
+      const totalUnrealizedLossRs = (avgCost - ltp) * settledQty;
       const ler = liberatedUsable / (lossRs || 1);
       sacrifices.push({
         symbol: sym,
@@ -405,6 +400,7 @@
         ltp,
         lossPct,
         lossRs,
+        totalUnrealizedLossRs,
         buyerPotentialGain,
         buyerQty:finalBuyerShares,
         buyerDebit:finalBuyerShares*buyerPx*1.003,
@@ -438,8 +434,8 @@
       return { eligible: false, buyer, deficit, minTicket, reason: specificReason };
     }
 
-    // Rank sacrifices strictly by deepest underwater percentage loss first (worst loser trimmed first)
-    sacrifices.sort((a, b) => (b.lossPct - a.lossPct) || (b.lossRs - a.lossRs));
+    // Rank sacrifices by deepest absolute unrealized rupee P&L loss first (then percentage loss)
+    sacrifices.sort((a, b) => (b.totalUnrealizedLossRs - a.totalUnrealizedLossRs) || (b.lossPct - a.lossPct) || (b.lossRs - a.lossRs));
     const chosen = sacrifices[0];
     const trimLabel = chosen.isPartial ? `Trim ${chosen.sharesToSell}/${chosen.qty} sh` : `Sell full ${chosen.sharesToSell} sh`;
     const zombieTag = chosen.isZombie ? ' [Zombie Capital]' : '';

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 09:44 IST'; // release build date (IST)
-const APP_VERSION=1712;
+const BUILD_TS='2026-11-16 09:58 IST'; // release build date (IST)
+const APP_VERSION=1713;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5500,7 +5500,8 @@ function getOpportunitySwapForCandidate(s){
   const score = Number(s.score || s.stratScore || btstScoreOf(s.symbol) || 1.0);
   const quote = _universeMap.get(s.symbol);
   const vwap = Number(quote?.vwap || s.vwap || px);
-  const minCap = Math.max(Number(RocketStrategy.CONFIG?.MIN_ALLOCATION_RS) || 0, px);
+  const minSh = typeof RocketStrategy.minSharesForStock === 'function' ? RocketStrategy.minSharesForStock(px, false, getLiveMlotQuantiles()) : 1;
+  const minCap = Math.max(minSh * px, Number(RocketStrategy.CONFIG?.MIN_ALLOCATION_RS) || 0, px);
   const candidate = {
     symbol: s.symbol,
     price: px,
