@@ -279,10 +279,6 @@
     if (!Array.isArray(heldPositions) || !heldPositions.length) {
       return { eligible: false, reason: 'No open positions to evaluate for sacrifice' };
     }
-    const breadth = Number.isFinite(options.breadth) ? Number(options.breadth) : 0.50;
-    if (breadth < 0.50) {
-      return { eligible: false, reason: `Market breadth ${(breadth * 100).toFixed(1)}% < 50%` };
-    }
     if (options.circuitBroken) {
       return { eligible: false, reason: 'Swap circuit breaker active (prior swap stopped out)' };
     }
