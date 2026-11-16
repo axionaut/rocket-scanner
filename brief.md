@@ -1,10 +1,11 @@
-# Active Task: Deployed v1713 / Operational
+# Active Task: Deployed v1714 / Operational
 
-Rocket Scanner v1713 deployed at 2026-11-16 09:58 IST. System operational and in sync with origin/master.
+Rocket Scanner v1714 deployed at 2026-11-16 10:01 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1714:** Include sell charges in Opportunity Swap share sizing so AVTNPL is not skipped by DP fee rounding
 - **v1713:** Underwrite Opportunity Swaps directly from absolute rupee 5-session profit budget and rank worst rupee losers first
 - **v1712:** Remove market breadth gate from Opportunity Swap
 - **v1711:** Fix MRMR Auto-Buy crossings eligibility, anti-chase bypass, and dedicated 65 floor persistence in server.js

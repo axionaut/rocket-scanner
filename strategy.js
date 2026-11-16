@@ -363,7 +363,13 @@
       const sellPrice = typeof options.sellPriceFor==='function' ? Number(options.sellPriceFor(h)) : Number(h.sellPrice||ltp);
       if(!(sellPrice>0&&sellPrice<=ltp))continue;
       const effectiveUsableLtp = sellPrice * usableCreditFactor;
-      const sharesNeeded = Math.ceil(deficit / effectiveUsableLtp);
+      let sharesNeeded = Math.ceil(deficit / effectiveUsableLtp);
+      while (sharesNeeded < settledQty && sharesNeeded < maxSharesByLoss) {
+        const gross = sharesNeeded * sellPrice;
+        const usable = Math.max(0, gross * usableCreditFactor - sumChargeParts(calcZerodhaChargesSplit(sellPrice, sharesNeeded, true, false, false)));
+        if (availableCash + usable >= targetBudget) break;
+        sharesNeeded++;
+      }
       let sharesToSell = Math.min(settledQty, maxSharesByLoss, sharesNeeded);
       if (sharesToSell <= 0) continue;
 
