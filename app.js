@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 09:18 IST'; // release build date (IST)
-const APP_VERSION=1732;
+const BUILD_TS='2026-11-17 09:31 IST'; // release build date (IST)
+const APP_VERSION=1733;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -15584,7 +15584,7 @@ function buildBasketOrders(capital, selList){
         recommendation:{capturedAt:Date.now(),session:getSessionDate(),score:btstScoreOf(sym),
           scoreAsOf:btstRanking()?.src?.asOf||null,scoreFloor:btstMinScore(),
           scoringModel:btstRanking()?.model||null,scoreA:btstScoreAOf(sym),
-          referencePrice:Number(s.price)||null,allocationPolicy:'score-proportional-v2',minPositionRs:executionControls?.minPositionRs,maxPositionRs:executionControls?.maxPositionRs,appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
+          referencePrice:Number(s.price)||null,allocationBudget:Math.max(Number(am?.budget)||0,Number(am?.debit)||0),allocationPolicy:'score-proportional-v2',minPositionRs:executionControls?.minPositionRs,maxPositionRs:executionControls?.maxPositionRs,appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
     });
   };
   // v1398: NO EXPORTED ORDER MAY EXCEED THE CASH BEHIND IT. 17 Sep 15:24 a BUY VENUSPIPES 6,000 @

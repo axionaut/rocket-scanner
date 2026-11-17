@@ -1,10 +1,11 @@
-# Active Task: Deployed v1732 / Operational
+# Active Task: Deployed v1733 / Operational
 
-Rocket Scanner v1732 deployed at 2026-11-17 09:18 IST. System operational and in sync with origin/master.
+Rocket Scanner v1733 deployed at 2026-11-17 09:31 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1733:** Make Min and Max allocation budgets inclusive of buy fees and whole-share rounding
 - **v1732:** Explain whole-share minimum, buy fees and cash reserve in unfunded buy messages
 - **v1731:** Automatically download and validate NSE report bundles through the local helper
 - **v1730:** Fix mRMR Methodology rendering and retain computed weights during refresh

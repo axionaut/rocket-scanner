@@ -179,12 +179,13 @@
     const cash=Number(account.cash);
     if(!Number.isFinite(cash)||cash<0)throw Error('Recorded available cash is required');
     const capital=Number(account.capital)>0?Math.min(cash,Number(account.capital)):cash;
-    const spendable=Math.max(0,capital-1),alloc={},reasons={},selected=[];
+    const inclusive=Number.isInteger(account.minPositionRs)||Number.isInteger(account.maxPositionRs);
+    const spendable=Math.max(0,capital-(inclusive?0:1)),alloc={},reasons={},selected=[];
     const pool=[...candidates].sort((a,b)=>(b.score||0)-(a.score||0)||
       ((a.triggerAt??Infinity)-(b.triggerAt??Infinity))||(b.rvol||0)-(a.rvol||0)||(b.barRs||0)-(a.barRs||0)||a.symbol.localeCompare(b.symbol));
     const fees=account.orderCharges||((qty,price)=>sumChargeParts(calcZerodhaChargesSplit(price,qty,false,false,false)));
     const quantity=(budget,r)=>{
-      if(!account.orderCharges)return quantityWithinBudget(budget,r.price,r.unit);
+      if(!account.orderCharges)return quantityWithinBudget(budget,r.price,r.unit??r.unitDebit);
       let lo=0,hi=Math.floor(budget/r.price);
       while(lo<hi){const n=Math.ceil((lo+hi)/2);if(n*r.price+fees(n,r.price)<=budget+1e-7)lo=n;else hi=n-1;}
       return lo;
@@ -197,20 +198,20 @@
       if(!reason&&!(r.liquidityCap>0))reason='No turnover or order-book depth to enforce the market-impact cap';
       const unit=r.unitDebit??r.price+sumChargeParts(calcZerodhaChargesSplit(r.price,1,false,false,false));
       const economicMin=account.minimumShares?account.minimumShares(r.price,!!r.held,account.mlot):minSharesForStock(r.price,!!r.held,account.mlot);
-      const positionMin=limits.min>0&&r.price>0?Math.ceil(limits.min/r.price-1e-9):0,minimum=Math.max(economicMin,positionMin);
-      const floor=account.orderCharges?minimum*r.price+fees(minimum,r.price):minimum*unit;
-      const room=limits.max>0?Math.max(0,limits.max-(Number(r.heldValue)||0)):Infinity,roomDebit=room*(unit/r.price);
-      const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity,roomDebit);
+      const economicFloor=account.orderCharges?economicMin*r.price+fees(economicMin,r.price):economicMin*unit;
+      const floor=Math.max(economicFloor,limits.min);
+      const minimum=Math.max(economicMin,quantity(floor,{...r,unit}));
+      const room=limits.max>0?Math.max(0,limits.max-(Number(r.heldValue)||0)):Infinity;
+      const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity,room);
       if(!reason&&floor>ceiling+1e-7){
-        const byPosition=positionMin>=economicMin&&positionMin>0;
-        reason = room<=0||minimum*r.price>room+1e-7
-          ? (r.heldValue>0?`Holding ${inr(r.heldValue)} leaves no room for a ${inr(minimum*r.price)} order under the ${inr(limits.max)} maximum position`:`One whole-share order (${inr(minimum*r.price)}) exceeds the ${inr(limits.max)} maximum position`)
-          : spendable < floor
-          ? (byPosition?`Minimum ${inr(limits.min)} requires ${minimum} shares + buy fees (${money(floor)} total). Available ${money(spendable)} after ${money(capital-spendable)} reserve; short ${money(floor-spendable)}`:`Available cash cannot cover the whole-share minimum order (needs ${inr(floor)})`)
-          : (byPosition?`Liquidity cap (one normal 5-min bar) cannot cover the ${inr(limits.min)} minimum position`:`Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum (needs ${inr(floor)})`);
+        reason=room<floor
+          ? `Remaining all-in position budget ${money(room)} cannot cover the ${money(floor)} minimum allocation`
+          : spendable<floor
+          ? `Waiting for cash: ${money(spendable)} available; minimum all-in allocation ${money(floor)}`
+          : `Liquidity or allocation cap cannot cover the ${money(floor)} all-in minimum`;
       }
       if(!reason&&selected.length>=maxStocks)reason='Stocks per allocation limit reached; higher scores funded first';
-      if(!reason&&reserved+floor>spendable+1e-7)reason=positionMin>=economicMin&&positionMin>0
+      if(!reason&&reserved+floor>spendable+1e-7)reason=limits.min>=economicFloor&&limits.min>0
         ?`Remaining cash cannot fund another ${inr(limits.min)} minimum position; higher scores funded first`
         :`Cash cannot cover every minimum order (needs ${inr(floor)}); higher scores funded first`;
       if(reason){reasons[r.symbol]=reason;continue;}
@@ -226,7 +227,7 @@
       const budget=Math.max(r.floor,Math.min(r.ceiling,lo*r.score)),qty=Math.max(r.minimum,quantity(budget,r));
       const cost=qty*r.price,charges=fees(qty,r.price),debit=cost+charges;
       if(debit>remaining+1e-7||debit>r.ceiling+1e-7)throw Error('Score allocation exceeded its funded capacity');
-      alloc[r.symbol]={qty,capital:cost,charges,debit,budget,minimum:r.minimum*r.price,score:r.score,weight:r.score/selected.reduce((n,x)=>n+x.score,0)};remaining-=debit;
+      alloc[r.symbol]={qty,capital:cost,charges,debit,budget,minimum:inclusive?r.floor:r.minimum*r.price,score:r.score,weight:r.score/selected.reduce((n,x)=>n+x.score,0)};remaining-=debit;
     }
     // Largest remainders; no cash overrun or fractional shares.
     const rounding=[...selected].sort((a,b)=>((alloc[b.symbol].budget/ b.unit)%1)-((alloc[a.symbol].budget/a.unit)%1)||b.score-a.score);
@@ -234,21 +235,26 @@
     return {alloc,reasons,funded:selected.map(r=>r.symbol),remaining,minimum:breakevenTurnover(false,account.mlot),mode:'score-proportional'};
   }
 
+  function accountEntryDebit(qty, price) {
+    return qty*price+sumChargeParts(calcZerodhaChargesSplit(price,qty,false,false,false));
+  }
+
   function authorizeAccountEntry(request, live, minimum) {
-    const isSwap = request.kind === 'opportunity-swap' || request.isOpportunitySwap;
-    const budget=Math.min(live.cash,Number.isFinite(live.allocationCap)?live.allocationCap:Infinity);
-    const qty=Math.min(request.qty,quantityWithinBudget(budget,request.cap,request.cap*1.003));
+    const isSwap=request.kind==='opportunity-swap'||request.isOpportunitySwap;
+    const budget=Math.min(live.cash,Number.isFinite(live.allocationCap)?live.allocationCap:Infinity,
+      !isSwap&&Number(request.allocationBudget)>0?Number(request.allocationBudget):Infinity);
+    if(!isSwap&&Number(live.minAllocationRs)>budget+1e-7)throw Error('Cash left is below the minimum all-in allocation');
+    const unit=isSwap?request.cap*1.003:accountEntryDebit(1,request.cap);
+    const qty=Math.min(request.qty,quantityWithinBudget(budget,request.cap,unit));
     if(!(qty>0)) {
-      if (isSwap) throw Error('Cash unavailable: waiting for sacrifice sell fill');
+      if(isSwap)throw Error('Cash unavailable: waiting for sacrifice sell fill');
       throw Error('Entry no longer fits available cash');
     }
     if(minimum>0&&qty*request.cap<minimum) {
-      if (isSwap) throw Error('Cash unavailable: waiting for sacrifice sell fill');
-      throw Error(`Cash left fits only ${qty} share(s) (Rs ${Math.round(qty*request.cap)}), below the Rs ${Math.round(minimum)} minimum`);
+      if(isSwap)throw Error('Cash unavailable: waiting for sacrifice sell fill');
+      throw Error(`Cash left fits only ${qty} share(s), below the cost-coverage minimum`);
     }
-    if(isSwap){
-      if(request.fundingPending||!request.fundingSale)throw Error('Cash unavailable: waiting for sacrifice sell fill');
-    }
+    if(isSwap&&(request.fundingPending||!request.fundingSale))throw Error('Cash unavailable: waiting for sacrifice sell fill');
     return qty;
   }
 
@@ -1026,6 +1032,7 @@ function bookedSession(session,holdingCosts,tradebook){
     positionLimits,
     ibkrOrderFee,
     authorizeAccountEntry,
+    accountEntryDebit,
     evaluateOpportunitySwap,
     swapEconomics,
     swapSellBasket,
