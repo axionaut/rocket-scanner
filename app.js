@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 12:02 IST'; // release build date (IST)
-const APP_VERSION=1739;
+const BUILD_TS='2026-11-17 13:52 IST'; // release build date (IST)
+const APP_VERSION=1740;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5324,7 +5324,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const source=BTST.data||BTST.rank,sym=normSym(s.symbol);
     if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
     if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
-    if(!source||source.activeModel!=='MRMR'||!source.mrmr?.ok){
+    if(!source||source.activeModel!=='MRMR'||!source.mrmr?.ok||source.mrmr.indicatorVersion!==RocketStrategy.MRMR_INDICATOR_VERSION){
       return {state:'WAIT',reason:source?.mrmr?.reason||'Awaiting Original mRMR prior-close return scores (218 features)'};
     }
     const score=btstScoreOf(s.symbol);

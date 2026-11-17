@@ -68,3 +68,9 @@
 ## MRMR entry guards - owner, 17 November 2026
 
 - Original mRMR entries (score at or above floor) additionally require: (1) VWAP basing - a stock below session VWAP must have crossed it at least twice today; (2) no heavy selling volume - last 15 one-minute bars net down, at least 60% of their volume on down bars and bar volume at least 1.5x the session norm blocks entry. Metrics come from the mRMR worker's 1-minute bars; both guards are skipped until 15 session bars exist. Shared by the page and broker authorisation via picks/crossings (S.mrmrEntryGuard).
+
+## Corrected mRMR indicator contract - owner, 17 November 2026
+
+- Preserve prior-close continuous-return learning (`mrmr-prior-close-return-v2`) and the 218-indicator schema. Use real completed session candles for technical inference, with no appended flat quote candle; await the first completed session candle. Live price/depth and exchange VWAP remain authoritative for entry readiness.
+- Session VWAP participation, dispersion and slopes exclude prior sessions. ADX uses Wilder smoothing, MACD histogram slope compares historical histograms, and named EMA9 inputs use period 9.
+- Validate all 52 Ensemble semantic weight mappings against canonical indicator names and reject missing mappings. Indicator contract `mrmr-completed-indicators-20261117-v1` is mandatory for fresh snapshots and model caches; reject legacy indicator snapshots. No chase/volume research cutoffs, hand-set weights, allocation or exit changes were approved in this correction.

@@ -995,6 +995,7 @@ function bookedSession(session,holdingCosts,tradebook){
   function memEntryState(source,symbol,quote,now=Date.now()) {
     if(source?.rules?.pickPolicy!==MEM_PICK_POLICY)return {state:'WAIT',reason:'Awaiting the adaptive top-five strategy update'};
     const p=source.ensemblePipeline,at=Date.parse(p?.asOf),sym=String(symbol||'').toUpperCase();
+    if(p?.indicatorVersion!==MRMR_INDICATOR_VERSION)return {state:'WAIT',reason:'Awaiting scores from the corrected indicator engine'};
     if(source.ok!==true||p?.ok!==true||source.session!==nseClock(now).day||!Number.isFinite(at)||now<at||now-at>180000)return {state:'WAIT',reason:'Awaiting fresh combined-model scores'};
     if(!source.selection?.topSymbols?.includes(sym))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting the failed-stage assessment for this stock'};
     const ready=memQuoteState(quote,now);if(ready.state!=='READY')return ready;
@@ -1011,6 +1012,7 @@ function bookedSession(session,holdingCosts,tradebook){
   //  - VWAP basing: a stock still below session VWAP must have crossed it at least twice today.
   //  - Heavy selling volume: last 15 bars net down, >=60% of their volume on down bars, and bar volume >=1.5x the session norm.
   const MRMR_GUARD = Object.freeze({minBars:15,minCrossings:2,window:15,sellShare:0.6,volRatio:1.5});
+  const MRMR_INDICATOR_VERSION = 'mrmr-completed-indicators-20261117-v1';
   function mrmrEntryGuard(g) {
     if(!g||!(Number(g.bars)>=MRMR_GUARD.minBars))return null;
     if(Number(g.price)<Number(g.vwap)&&Number(g.vwapCross)<MRMR_GUARD.minCrossings)
@@ -1034,7 +1036,7 @@ function bookedSession(session,holdingCosts,tradebook){
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
     applySelectedModel,
     entryScoreCapped,
-    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
+    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,
     CUM_REFINEMENT,
     cumRefinementReason,
