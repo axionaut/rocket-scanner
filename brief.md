@@ -1,10 +1,11 @@
-# Active Task: Deployed v1730 / Operational
+# Active Task: Deployed v1731 / Operational
 
-Rocket Scanner v1730 deployed at 2026-11-16 16:26 IST. System operational and in sync with origin/master.
+Rocket Scanner v1731 deployed at 2026-11-17 09:01 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1731:** Automatically download and validate NSE report bundles through the local helper
 - **v1730:** Fix mRMR Methodology rendering and retain computed weights during refresh
 - **v1729:** Complete shared prior-close return mRMR rollout and strategy labels
 - **v1728:** Use prior-close continuous-return mRMR learning consistently across both models

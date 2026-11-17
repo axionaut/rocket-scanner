@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-16 16:26 IST'; // release build date (IST)
-const APP_VERSION=1730;
+const BUILD_TS='2026-11-17 09:01 IST'; // release build date (IST)
+const APP_VERSION=1731;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4663,6 +4663,7 @@ function queuePageLiveReads(names){
       if(pending.has('positions')||pending.has('portfolio'))tasks.push(loadProfitLockStatus());
       if(pending.has('auto')||pending.has('portfolio'))tasks.push(loadAutoBuyStatus());
       if(pending.has('margins')||pending.has('portfolio')||pending.has('auto')||pending.has('positions'))tasks.push(loadKiteMargins());
+      if(pending.has('nse-reports')){NSE_REPORTS_STATUS_AT=0;_lastIndependentInputCheck=0;tasks.push(refreshChangedHelperInputs());}
       if(pending.has('portfolio')){_lastIndependentInputCheck=0;tasks.push(refreshChangedHelperInputs());}
       await Promise.allSettled(tasks);
       try{renderStats();}catch(_){}
@@ -13395,7 +13396,18 @@ async function loadCorpusCoverage(){
 let _helperInputSigs={};
 let _helperHydration=null;
 let _lastIndependentInputCheck=0;
+let NSE_REPORTS_STATUS=null,NSE_REPORTS_STATUS_AT=0;
+async function refreshNseReportsStatus(){
+  if(Date.now()-NSE_REPORTS_STATUS_AT<60000)return;
+  NSE_REPORTS_STATUS_AT=Date.now();
+  try{
+    NSE_REPORTS_STATUS=await readHelperResponse('/api/nse/reports',{timeout:5000});
+    renderStatusBar();
+  }catch(_){}
+}
+
 async function refreshChangedHelperInputs(){
+  refreshNseReportsStatus();
   if(Date.now()-_lastIndependentInputCheck<10000) return false;
   _lastIndependentInputCheck=Date.now();
   try{return await hydrateFromHelper('live refresh');}
@@ -14460,6 +14472,13 @@ function renderStatusBar(){
     const topStr=(mrmr?.topFeatures||[]).slice(0,5).map(t=>`${t.f}(${(t.w*100).toFixed(1)}%)`).join(', ');
     const scoreStatus=mrmr?.ok?`${mrmr.scoredCount??0} scored · ${mrmr.learningStocks??0} prior-close learning stocks · ${mrmr.featureCount||218} feats · ${mrmr.regime||'neutral'}`:(mrmr?.reason||'Computing 218 features…');
     bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(topStr?'Top mRMR features: '+topStr:(mrmr?.reason||'Original mRMR prior-close return learning'))}">mRMR: ${escHtml(scoreStatus)}</span>`);
+  }
+  if(NSE_REPORTS_STATUS){
+    const nse=NSE_REPORTS_STATUS;
+    const checked=Date.parse(nse.lastCheckedAt);
+    const time=Number.isFinite(checked)?new Date(checked).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false}):'';
+    const label=nse.error?'update failed':nse.busy?'checking':nse.reports?.length?`${nse.reports.length} reports${time?' | checked '+time+' IST':''}`:'awaiting download';
+    bits.push(`<span style="color:var(--${nse.error?'amber':'t2'})" title="${escHtml(nse.error||'NSE reports download automatically at helper startup and every 15 minutes')}">NSE: ${escHtml(label)}</span>`);
   }
   if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
