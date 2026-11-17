@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 15:27 IST'; // release build date (IST)
-const APP_VERSION=1743;
+const BUILD_TS='2026-11-17 16:01 IST'; // release build date (IST)
+const APP_VERSION=1744;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12500,6 +12500,21 @@ function sortValueOf(row,key){
 // every model. An explicit Model Score header click sorts the numeric score alone, either direction.
 const STATUS_SORT_RANK={GO:0,WAIT:2,BLOCKED:3};   // ARMED (a WAIT that crossed and is waiting for its upticks) ranks 1
 function compareModelScoreRows(a,b){
+  // AVWAP is binary: order waiting stocks by distance to their next upward crossing.
+  if(!a._us&&!b._us&&floorModel()==='AVWAP_CROSS'){
+    const stateRank=row=>({GO:0,WAIT:1,BLOCKED:2}[getRowActionState(row).state]??3);
+    const ar=stateRank(a),br=stateRank(b);
+    if(ar!==br)return ar-br;
+    if(ar===1){
+      const gap=row=>{const s=avwapTableSignal(row);return Number.isFinite(s?.vwap)&&s?.avwap>0?100*(s.vwap/s.avwap-1):null;};
+      const ag=gap(a),bg=gap(b);
+      const group=g=>g===null?2:g<=0?0:1;
+      const ac=group(ag),bc=group(bg);
+      if(ac!==bc)return ac-bc;
+      if(ac===0&&ag!==bg)return bg-ag;
+    }
+    return String(a.symbol).localeCompare(String(b.symbol));
+  }
   if(!a._us&&!b._us&&floorModel()==='MARKOV_3PCT'){
     const top=BTST.data?.selection?.topSymbols||[],ai=top.indexOf(normSym(a.symbol)),bi=top.indexOf(normSym(b.symbol));
     if((ai>=0)!==(bi>=0))return ai>=0?-1:1;
