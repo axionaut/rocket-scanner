@@ -175,6 +175,7 @@
     const maxStocks=account.maxStocks??20;
     if(!Number.isInteger(maxStocks)||maxStocks<1||maxStocks>20)throw Error('Stocks per allocation must be an integer from 1 to 20');
     const limits=positionLimits(account),inr=v=>'₹'+Math.round(v).toLocaleString('en-IN');
+    const money=value=>'\u20b9'+Number(value).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
     const cash=Number(account.cash);
     if(!Number.isFinite(cash)||cash<0)throw Error('Recorded available cash is required');
     const capital=Number(account.capital)>0?Math.min(cash,Number(account.capital)):cash;
@@ -205,7 +206,7 @@
         reason = room<=0||minimum*r.price>room+1e-7
           ? (r.heldValue>0?`Holding ${inr(r.heldValue)} leaves no room for a ${inr(minimum*r.price)} order under the ${inr(limits.max)} maximum position`:`One whole-share order (${inr(minimum*r.price)}) exceeds the ${inr(limits.max)} maximum position`)
           : spendable < floor
-          ? (byPosition?`Waiting for cash: ${inr(spendable)} free is below the ${inr(limits.min)} minimum position`:`Available cash cannot cover the whole-share minimum order (needs ${inr(floor)})`)
+          ? (byPosition?`Minimum ${inr(limits.min)} requires ${minimum} shares + buy fees (${money(floor)} total). Available ${money(spendable)} after ${money(capital-spendable)} reserve; short ${money(floor-spendable)}`:`Available cash cannot cover the whole-share minimum order (needs ${inr(floor)})`)
           : (byPosition?`Liquidity cap (one normal 5-min bar) cannot cover the ${inr(limits.min)} minimum position`:`Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum (needs ${inr(floor)})`);
       }
       if(!reason&&selected.length>=maxStocks)reason='Stocks per allocation limit reached; higher scores funded first';
