@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 16:17 IST'; // release build date (IST)
-const APP_VERSION=1747;
+const BUILD_TS='2026-11-17 16:23 IST'; // release build date (IST)
+const APP_VERSION=1748;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5586,11 +5586,12 @@ function rowStatusPillHtml(s){
   const tone=act.state==='BLOCKED'?'red':act.state==='GO'&&!unfunded?'green':'amber';
   // v1581 (owner 28 Oct): one pill and one short line; the full reason is in the tooltip. Crossing and exit
   // detail live in their own columns.
-  const label=act.armed?'ARMED':act.state;
+  const closed=floorModel()==='AVWAP_CROSS'&&act.reason?.startsWith('NSE market is closed');
+  const label=closed?'CLOSED':act.armed?'ARMED':act.state;
   const full=act.state==='GO'&&reason?reason:act.reason;
   const first=String(full||'').split(/(?<=\.)\s/)[0],line=first.length>90?first.slice(0,88)+'…':first;
   return `<span class="info-pill pill-${act.armed?'amber':tone}" title="${escHtml(full)}">${label}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
-    +(line?`<div style="font-size:12px;color:var(--${act.state==='GO'&&reason?'amber':'t3'})" title="${escHtml(full)}">${escHtml(line)}</div>`:'');
+    +(!closed&&line?`<div style="font-size:12px;color:var(--${act.state==='GO'&&reason?'amber':'t3'})" title="${escHtml(full)}">${escHtml(line)}</div>`:'');
 }
 function avwapTableSignal(s){
   if(s?._us)return null;
@@ -10632,7 +10633,7 @@ function _renderMethodologyInner(){
 // Fixed columns + dynamic top 10 rocket-relevance features (skip empty ones)
 function getCols(){
   if(floorModel()==='AVWAP_CROSS')return [
-    {key:'chk',label:'',s:0},{key:'defaultRank',label:'Default rank',s:1},{key:'symbol',label:'Stock',s:1},
+    {key:'defaultRank',label:'Default<br>rank',s:1},{key:'symbol',label:'Stock',s:1},
     {key:'status',label:'Entry status',s:1},{key:'price',label:'Price / Day',s:1},
     {key:'sessionVwap',label:'5m VWAP',s:1},{key:'anchoredVwap',label:'T-2 AVWAP',s:1},
     {key:'vwapGap',label:'VWAP gap',s:1},
@@ -10642,7 +10643,6 @@ function getCols(){
   return applyColOrder('main-rankings',[
     // v1581 (owner 28 Oct): only what the buy/exit decisions use. From High, Buyer/Seller, RelVol, Turnover and the
     // fixed Target are dropped (they remain in the row detail on click).
-    {key:'chk',label:'',s:0},
     {key:'status',label:'Status',s:1},
     {key:'score',label:'Strategy Status',s:1},
     {key:'symbol',label:'Symbol',s:1},
@@ -11760,6 +11760,10 @@ function renderBasketSummary(){
 
 function renderHead(){
   COLS=getCols(); // refresh in case ENGINE_DATA changed
+  const table=document.getElementById('tHead').closest('table');
+  table.classList.toggle('avwap-table',floorModel()==='AVWAP_CROSS');
+  table.querySelector('colgroup[data-rank-layout]')?.remove();
+  if(floorModel()==='AVWAP_CROSS'){const group=document.createElement('colgroup');group.dataset.rankLayout='true';group.innerHTML=['96px','20%','auto','170px','130px','150px','110px','140px'].map(width=>'<col style="width:'+width+'">').join('');table.prepend(group);}
   const exportable=FILT.filter(isSelectableRecommendation);
   const allChecked=exportable.length>0&&exportable.every(s=>SELECTED.has(s.symbol));
   const someChecked=exportable.some(s=>SELECTED.has(s.symbol));
@@ -12226,7 +12230,7 @@ function usRowHtml(r){
     chk:`<td style="text-align:center"><input type="checkbox" disabled title="US stock: suggest-only, place it in IBKR yourself" style="width:14px;height:14px"></td>`,
     rank:'<td style="text-align:right;color:var(--t3)">—</td>',
     score:`<td data-key="score" style="text-align:center" title="US model score vs the US floor ${r.fl}"><span style="font-weight:800;font-family:'DM Mono',monospace;color:${r.score>=r.fl?'var(--green)':'var(--amber)'}">${sc}</span><span style="font-size:13px;color:var(--t3)"> / ${r.fl}</span></td>`,
-    symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:15px;color:var(--t1)">🇺🇸 ${escHtml(r.symbol)} <a href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(r.symbol)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:13px;color:var(--cyan);text-decoration:none" title="TradingView chart">T</a></div><div style="font-size:13px;color:var(--t3);max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(r.sector||'')}</div></td>`,
+    symbol:`<td data-key="symbol" style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:15px;color:var(--t1)">🇺🇸 ${escHtml(r.symbol)} <a href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(r.symbol)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:13px;color:var(--cyan);text-decoration:none" title="TradingView chart">T</a></div><div style="font-size:13px;color:var(--t3);max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(r.sector||'')}</div></td>`,
     status:`<td data-key="status" class="recommendation-status">${status}</td>`,
     price:`<td data-key="price" style="white-space:nowrap">${usd(r.price)}<span style="color:var(--t3)"> · </span><span style="font-size:13px">${fPerf(chg)}</span></td>`,
     day:`<td>${fPerf(chg)}</td>`,
@@ -12344,7 +12348,7 @@ function renderTable(){
     // user-reordered) header (v536).
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
-      defaultRank:`<td data-key="defaultRank" style="font-family:monospace;text-align:right" title="Position in the model default order">${defaultRanks?.get(s.symbol)??'-'}</td>`,
+      defaultRank:`<td data-key="defaultRank" style="font-family:monospace;text-align:center" title="Position in the model default order">${defaultRanks?.get(s.symbol)??'-'}</td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       sessionVwap:`<td data-key="sessionVwap">${avwapTableCell(s,'sessionVwap')}</td>`,
       anchoredVwap:`<td data-key="anchoredVwap">${avwapTableCell(s,'anchoredVwap')}</td>`,
