@@ -981,8 +981,7 @@ function bookedSession(session,holdingCosts,tradebook){
     if(bookAge>MEM_QUOTE_TTL_MS)return {state:'WAIT',reason:`Order book is ${Math.ceil(bookAge/1000)}s old; needs an update (maximum ${MEM_QUOTE_TTL_MS/1000}s)`};
     const ask=Number(quote?.ask),askQty=Number(quote?.askQty);
     if(!(ask>0&&askQty>=1))return {state:'WAIT',reason:'No sell offer available in the live order book'};
-    const size=Number(quote?.tickSize),rawCap=price*1.0025,cap=size>0?Math.floor(rawCap/size+1e-9)*size:rawCap;
-    if(ask>cap+1e-9)return {state:'WAIT',reason:`Best offer ₹${ask.toFixed(2)} exceeds entry price cap ₹${cap.toFixed(2)}`};
+    // 17 Nov 2026 (owner): no pre-entry offer-vs-cap gate; the IOC order's own +0.25% price cap bounds execution.
     return {state:'READY',reason:'Fresh quote and executable offer verified'};
   }
   function selectMemCandidates(ranking) {
@@ -1002,7 +1001,6 @@ function bookedSession(session,holdingCosts,tradebook){
     const price=Number(quote.price),vwap=Number(quote.vwap);
     if(!nseContinuous(now,sym))return {state:'WAIT',reason:'Outside continuous trading session'};
     if(price<vwap)return {state:'WAIT',reason:`Shortlist #${source.selection.topSymbols.indexOf(sym)+1}: needs +${((vwap/price-1)*100).toFixed(2)}% to reclaim VWAP ₹${vwap.toFixed(2)} (last ₹${price.toFixed(2)})`};
-    if(price>vwap*1.015)return {state:'WAIT',reason:'Outside VWAP anti-chase band (+1.5%)'};
     const pick=source.picks?.find(p=>p.symbol===sym);
     if(!pick?.triggered||!source.ranking?.some(r=>r[0]===sym&&Number.isFinite(r[1])&&r[1]>0))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting current execution eligibility'};
     return {state:'GO',reason:'Top-five positive Ensemble candidate; fresh VWAP entry confirmed'};

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 10:08 IST'; // release build date (IST)
-const APP_VERSION=1736;
+const BUILD_TS='2026-11-17 11:40 IST'; // release build date (IST)
+const APP_VERSION=1737;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8691,7 +8691,7 @@ function lossBudgetSummary(plk=PROFIT_LOCK_STATUS){
   const cutoff=Number(lb.triggerPct);
   const activeTrims=[...(plk.bySym?.values()||[])].filter(p=>p&&p.lossGttId&&p.lossGttQty>0);
   const activeText=activeTrims.length?activeTrims.map(p=>`${p.sym} ×${p.lossGttQty}${p.lossGttTrigger>0?' @ ₹'+p.lossGttTrigger:''}`).join(', '):'none armed';
-  const tip=`Profit-funded trim pool (today only, ${sharePct}% share${cutoff>0?`, -${cutoff}% cutoff`:''}):\nToday wins: ${fmtSignedINR(wins)} | Base pool: ${fmtSignedINR(baseNet)}\nToday losses: ${fmtINR(losses)} | Active GTT reserve: ${fmtINR(res)} (${activeText}) | Cushion: ${fmtINR(reserve)}\nRemaining budget: ${fmtINR(avail)}`;
+  const tip=lb.paused?'Profit-funded trims paused. New buys use a reclaim initial SL and the existing upward ratchet.':`Profit-funded trim pool (today only, ${sharePct}% share${cutoff>0?`, -${cutoff}% cutoff`:''}):\nToday wins: ${fmtSignedINR(wins)} | Base pool: ${fmtSignedINR(baseNet)}\nToday losses: ${fmtINR(losses)} | Active GTT reserve: ${fmtINR(res)} (${activeText}) | Cushion: ${fmtINR(reserve)}\nRemaining budget: ${fmtINR(avail)}`;
   return {sharePct,avail,res,reserve,wins,losses,net5,baseNet,priorNet,cutoff,activeTrims,activeText,tip};
 }
 function renderStats(){
@@ -9386,7 +9386,7 @@ function buildLatestSessionPanel(query=''){
       highGapMin:shownSummary.peakMedianMin
     }:null;
     const lossBudget=Date.now()-PROFIT_LOCK_STATUS.at<60000?PROFIT_LOCK_STATUS.lossBudget:null;
-    const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | '+(lossBudget.triggerPct>0?(lossBudget.triggerPct<0.01?'the single worst holding below cost':'below -'+lossBudget.triggerPct+'%'):'cutoff paused')+'; '+(lossBudget.pool?.complete&&Number.isFinite(lossBudget.fundingShare)?'Today?s booked net estimate after wins, losses and completed trims: '+fmtPerfRs(lossBudget.pool.net)+'; '+Number((lossBudget.fundingShare*100).toFixed(2))+'% available before reservations and ₹5 cushion':'waiting for complete current-session accounting')+'; weighted account basis and estimated costs; broker FIFO may differ'+(PROFIT_LOCK_STATUS.bracket?' | Base upper gap '+(PROFIT_LOCK_STATUS.bracket.params.upperGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, lower gap '+(PROFIT_LOCK_STATUS.bracket.params.lowerGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, zone '+PROFIT_LOCK_STATUS.bracket.params.zonePct+'% | '+PROFIT_LOCK_STATUS.bracket.learning.finished+'/40 finished trades | '+bracketLearningStatusText():'')+(!lossBudget.known?' | accounting incomplete':'')+'</div>':'';
+    const lossAllowance=lossBudget?.paused?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Profit-funded trims paused. New buys start with a reclaim SL and the existing upward ratchet.</div>':lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | '+(lossBudget.triggerPct>0?(lossBudget.triggerPct<0.01?'the single worst holding below cost':'below -'+lossBudget.triggerPct+'%'):'cutoff paused')+'; '+(lossBudget.pool?.complete&&Number.isFinite(lossBudget.fundingShare)?'Today?s booked net estimate after wins, losses and completed trims: '+fmtPerfRs(lossBudget.pool.net)+'; '+Number((lossBudget.fundingShare*100).toFixed(2))+'% available before reservations and ₹5 cushion':'waiting for complete current-session accounting')+'; weighted account basis and estimated costs; broker FIFO may differ'+(PROFIT_LOCK_STATUS.bracket?' | Base upper gap '+(PROFIT_LOCK_STATUS.bracket.params.upperGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, lower gap '+(PROFIT_LOCK_STATUS.bracket.params.lowerGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, zone '+PROFIT_LOCK_STATUS.bracket.params.zonePct+'% | '+PROFIT_LOCK_STATUS.bracket.learning.finished+'/40 finished trades | '+bracketLearningStatusText():'')+(!lossBudget.known?' | accounting incomplete':'')+'</div>':'';
     const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals,'sym');
     const emptyNote=String(query||'').trim()
       ?panelNoMatchHtml(query,'booked trade')
@@ -9651,7 +9651,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker bracket and profit-funded partial loss trims using the current learned cutoff (initially -1.25%). No holding-age deadline. Exit advice requires fresh live prices. During the session, the helper checks positions every 10 seconds and refreshes on order updates, even with this page closed. ${escHtml(bracketLearningStatusText())}.</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. New buys start with a reclaim pullback SL buffered by one completed-minute ATR(14), followed by the existing upward ratchet. Profit-funded trims are paused. Existing positions retain their established stop protection. No holding-age deadline. Exit advice requires fresh live prices. During the session, the helper checks positions every 10 seconds and refreshes on order updates, even with this page closed. ${escHtml(bracketLearningStatusText())}.</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -11363,10 +11363,10 @@ function getOpenPositionTapePolicy(sym,pos){
   if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
   const lossStop=plk?.lossGttId&&plk?.lossGttQty>0&&plk.lossGttQty<=qty&&plk?.lossGttTrigger>0?plk.lossGttTrigger:null;
-  const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
+  const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=brokerStop||lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
-      targetWhy:(activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`)+(plk?.bracketParams?`; upper gap ${plk.bracketParams.upperGapPct??plk.bracketParams.gapPct}%, lower gap ${plk.bracketParams.lowerGapPct??plk.bracketParams.gapPct}%, zone ${plk.bracketParams.zonePct}%`:''),stopWhy:lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from the today?s booked-profit budget`:slPct>0?`-${slPct}% from average buy cost`:'Loss trims wait for '+(plk?.lossCutoffPct>0?`a loss greater than ${plk.lossCutoffPct}%`:'the helper’s current cutoff')+' and the configured share of today?s booked profit after charges and losses',
+      targetWhy:(activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`)+(plk?.bracketParams?`; upper gap ${plk.bracketParams.upperGapPct??plk.bracketParams.gapPct}%, lower gap ${plk.bracketParams.lowerGapPct??plk.bracketParams.gapPct}%, zone ${plk.bracketParams.zonePct}%`:''),stopWhy:brokerStop?`Confirmed ratchet SL at ${brokerStop}${plk?.reclaimStop?' (started from reclaim pullback low minus ATR14)':''}`:plk?.reclaimStop?`Reclaim SL ${plk.reclaimStop.lower}; awaiting broker confirmation`:PROFIT_LOCK_STATUS?.lossBudget?.paused?'Profit-funded trims paused':lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from the today?s booked-profit budget`:slPct>0?`-${slPct}% from average buy cost`:'Loss trims wait for '+(plk?.lossCutoffPct>0?`a loss greater than ${plk.lossCutoffPct}%`:'the helper’s current cutoff')+' and the configured share of today?s booked profit after charges and losses',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null,
     profitLock:plk||null,lockStopPrice:verdict.lockStopPrice||null};
 }
