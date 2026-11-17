@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 16:01 IST'; // release build date (IST)
-const APP_VERSION=1744;
+const BUILD_TS='2026-11-17 16:02 IST'; // release build date (IST)
+const APP_VERSION=1745;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12513,6 +12513,9 @@ function compareModelScoreRows(a,b){
       if(ac!==bc)return ac-bc;
       if(ac===0&&ag!==bg)return bg-ag;
     }
+    const ap=Number.isFinite(Number(a.price))&&Number(a.price)>0?Number(a.price):Infinity;
+    const bp=Number.isFinite(Number(b.price))&&Number(b.price)>0?Number(b.price):Infinity;
+    if(ap!==bp)return ap-bp;
     return String(a.symbol).localeCompare(String(b.symbol));
   }
   if(!a._us&&!b._us&&floorModel()==='MARKOV_3PCT'){
