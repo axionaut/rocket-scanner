@@ -1,10 +1,11 @@
-# Active Task: Deployed v1740 / Operational
+# Active Task: Deployed v1741 / Operational
 
-Rocket Scanner v1740 deployed at 2026-11-17 13:52 IST. System operational and in sync with origin/master.
+Rocket Scanner v1741 deployed at 2026-11-17 14:09 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1741:** Fix strategy-switch confirmation timeouts and remove repeated mRMR payloads
 - **v1740:** Correct mRMR indicator formulas, completed-candle inputs and all Ensemble weight mappings
 - **v1739:** Add MRMR entry guards: VWAP basing and heavy-selling-volume block
 - **v1738:** Remove unintended initial SL draft and restore profit-funded trims while preserving v1737 entry changes

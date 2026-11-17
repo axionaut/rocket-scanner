@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 13:52 IST'; // release build date (IST)
-const APP_VERSION=1740;
+const BUILD_TS='2026-11-17 14:09 IST'; // release build date (IST)
+const APP_VERSION=1741;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4914,19 +4914,39 @@ function initModelUI(){
     }).catch(()=>{});
   }catch(e){}
 }
-function onModelChange(){
+async function onModelChange(){
   const el=document.getElementById('fModel'),m=el?.value;
   if(!SELECTABLE_MODELS.includes(m)||_modelSwitchPending)return;
   const previous=savedModelChoice()||'CUM';
   el.value=previous;el.disabled=true;_modelChoiceEpoch++;_modelSwitchPending=true;
-  return readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(data=>{
+  try{
+    let data;
+    try{
+      data=await readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:15000});
+    }catch(error){
+      // An aborted response does not prove the server failed to save the choice.
+      showToast('Checking the helper’s selected strategy…',3000);
+      data=await readHelperResponse('/api/btst/model',{timeout:15000});
+      if(data?.ok&&SELECTABLE_MODELS.includes(data.model)&&data.model!==m){
+        rememberModelChoice(data.model);el.value=data.model;
+        RocketStrategy?.applySelectedModel(data.model);
+        initScoreFloorUI(true);refreshBtstModelView();
+        showToast('Helper kept '+btstModelName(data.model)+'. Please retry the switch.',5000,true);
+        return;
+      }
+    }
     if(!data||data.ok===false||data.model!==m)throw Error(data?.error||data?.why||'Strategy selection was not confirmed');
     rememberModelChoice(m);el.value=m;
     RocketStrategy?.applySelectedModel(m);
     initScoreFloorUI(true);refreshBtstModelView();
     if(ALL.length)applyFilters({preservePage:true});
-  }).catch(error=>{el.value=previous;rememberModelChoice(previous);alert('Strategy switch failed: '+error.message);})
-    .finally(()=>{_modelSwitchPending=false;el.disabled=false;});
+  }catch(error){
+    el.value=previous;
+    showToast('Strategy selection could not be confirmed: '+error.message,6000,true);
+  }finally{
+    _modelSwitchPending=false;el.disabled=false;
+    syncSelectedModelFromHelper();
+  }
 }
 // The model new orders are ranked and targeted on: the dropdown (helper-confirmed), else the saved choice.
 function selectedBtstModel(){
@@ -12908,6 +12928,9 @@ async function readHelperResponse(path,options={}){
     const r=await fetch(KITE_HELPER+path,{cache:'no-store',...request,signal:ctl.signal});
     if(!r.ok) throw new Error('Helper HTTP '+r.status);
     return await r[type]();
+  }catch(error){
+    if(ctl.signal.aborted){const timeoutError=new Error('Local helper did not respond within '+(timeout/1000)+' seconds');timeoutError.name='TimeoutError';throw timeoutError;}
+    throw error;
   }finally{clearTimeout(timer);}
 }
 function rssCompanyKey(value){
