@@ -60,3 +60,7 @@
 ## Inclusive allocation budgets - owner, 17 November 2026
 
 - Min/Max allocation rupees include buy charges. Min is the minimum cash budget to allocate, with whole shares rounded down inside it. Max caps existing holding value plus new shares and buy charges. Normal allocation uses available cash without an extra fixed rupee reserve. The page, broker authorisation and replay apply the same budget semantics.
+
+## Automatic target addition - owner, 17 November 2026
+
+- Target + % automatically follows the MLoT history total weighted median, using the same covered-stock-weighted harmonic calculation and two-decimal rounding as the displayed total. The field is read-only. Retain the last available target while history loads.

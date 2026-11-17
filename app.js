@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 09:31 IST'; // release build date (IST)
-const APP_VERSION=1733;
+const BUILD_TS='2026-11-17 09:40 IST'; // release build date (IST)
+const APP_VERSION=1734;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8063,7 +8063,10 @@ function applyExecutionControls(controls){
   const changed=JSON.stringify(executionControls)!==JSON.stringify(controls);
   executionControls=controls;
   for(const [key,id] of [['targetExtraPct','fTargetExtra'],['minPositionRs','fMinPosition'],['maxPositionRs','fMaxPosition']]){
-    const el=document.getElementById(id);if(el&&!executionControlDirty.has(key)&&document.activeElement!==el)el.value=controls[key];
+    const el=document.getElementById(id);
+    if(el&&key==='targetExtraPct'&&controls.targetExtraSource==='mlot-weighted-median'){
+      el.readOnly=true;el.value=Number(controls[key]).toFixed(2);executionControlDirty.delete(key);
+    }else if(el&&!executionControlDirty.has(key)&&document.activeElement!==el)el.value=controls[key];
   }
   if(changed){_dualPlanMemo=null;_usPlanMemo=null;if(typeof renderStats==='function')renderStats();}
 }
@@ -8127,16 +8130,7 @@ function mlotHistoryHtml(){
   const pc=v=>Number.isFinite(v)?v.toFixed(2)+'%':'—';
   const mins=v=>Number.isFinite(v)?'+'+(Number.isInteger(v)?v:v.toFixed(1))+'m':'—';
   const sum=k=>days.reduce((n,s)=>n+(Number(s[k])||0),0);
-  const medians=days.map(s=>({
-    median:s.medianPct,
-    count:Number.isFinite(s.coveredStocks)?s.coveredStocks:Number(s.stocks)-Number(s.unknownStocks||0)
-  })).filter(s=>Number.isFinite(s.median)&&s.median>=0&&s.count>0);
-  let weightedMedian=null;
-  if(medians.length){
-    const lowest=Math.min(...medians.map(s=>s.median));
-    // Scaling by the smallest median keeps inverse weights finite for tiny percentages.
-    weightedMedian=lowest===0?0:lowest*medians.reduce((n,s)=>n+s.count,0)/medians.reduce((n,s)=>n+s.count*(lowest/s.median),0);
-  }
+  const weightedMedian=RocketStrategy.weightedMlotMedian(days);
   const weightedMedianHtml=weightedMedian==null?'—':`<span title="Covered-stock-weighted harmonic mean of daily medians. Lower medians receive higher weight. Covered zero medians make the mean zero.">Weighted ${pc(weightedMedian)}</span>`;
   const delays=days.map(s=>s.medianPeakDelayMin).filter(Number.isFinite).sort((a,b)=>a-b);
   const midDelay=delays.length?(delays.length%2?delays[(delays.length-1)/2]:(delays[delays.length/2-1]+delays[delays.length/2])/2):null;

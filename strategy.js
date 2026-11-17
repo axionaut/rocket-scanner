@@ -164,6 +164,16 @@
   // Minimum: no new order smaller than this (cash below it waits). Maximum: a stock's total position
   // (existing holding + this order) never exceeds it. The count of names follows from cash / limits.
   // Opportunity-swap buys keep their own funding rules and do not use these limits.
+  function weightedMlotMedian(sessions) {
+    const medians=(sessions||[]).map(s=>({median:s.medianPct,
+      count:Number.isFinite(s.coveredStocks)?s.coveredStocks:Number(s.stocks)-Number(s.unknownStocks||0)}))
+      .filter(s=>Number.isFinite(s.median)&&s.median>=0&&Number.isFinite(s.count)&&s.count>0);
+    if(!medians.length)return null;
+    const lowest=Math.min(...medians.map(s=>s.median));
+    if(lowest===0)return 0;
+    return lowest*medians.reduce((n,s)=>n+s.count,0)/medians.reduce((n,s)=>n+s.count*(lowest/s.median),0);
+  }
+
   function positionLimits(account) {
     const min=Number(account?.minPositionRs)||0,max=Number(account?.maxPositionRs)||0;
     if(min<0||max<0||!Number.isFinite(min)||!Number.isFinite(max))throw Error('Position limits must be non-negative rupee amounts');
@@ -1030,6 +1040,7 @@ function bookedSession(session,holdingCosts,tradebook){
     minimumAllocationRs,
     planAccountEntries,
     positionLimits,
+    weightedMlotMedian,
     ibkrOrderFee,
     authorizeAccountEntry,
     accountEntryDebit,
