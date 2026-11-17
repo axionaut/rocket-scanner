@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 16:09 IST'; // release build date (IST)
-const APP_VERSION=1746;
+const BUILD_TS='2026-11-17 16:17 IST'; // release build date (IST)
+const APP_VERSION=1747;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10632,10 +10632,10 @@ function _renderMethodologyInner(){
 // Fixed columns + dynamic top 10 rocket-relevance features (skip empty ones)
 function getCols(){
   if(floorModel()==='AVWAP_CROSS')return [
-    {key:'chk',label:'',s:0},{key:'symbol',label:'Stock',s:1},
+    {key:'chk',label:'',s:0},{key:'defaultRank',label:'Default rank',s:1},{key:'symbol',label:'Stock',s:1},
     {key:'status',label:'Entry status',s:1},{key:'price',label:'Price / Day',s:1},
     {key:'sessionVwap',label:'5m VWAP',s:1},{key:'anchoredVwap',label:'T-2 AVWAP',s:1},
-    {key:'vwapGap',label:'VWAP gap',s:1},{key:'cross',label:'Signal candle',s:0},
+    {key:'vwapGap',label:'VWAP gap',s:1},
     {key:'alloc',label:'Allocation',s:1}
   ];
   // User-dragged column order (v536) applies here so header and cells always agree.
@@ -11775,11 +11775,12 @@ function renderHead(){
         </div>
       </th>`;
     }
-    const arr=c.key===SCOL?(SDIR===-1?'▼':'▲'):'';
+    const activeSort=c.key===SCOL||(c.key==='defaultRank'&&SCOL==='score');
+    const arr=activeSort?(SDIR===-1?'▼':'▲'):'';
     // v1409: the score column is centre-aligned, so its header must match or the label floats
     // left of the numbers it titles.
     const align=c.key==='score'?' style="text-align:center"':'';
-    return`<th data-key="${c.key}"${align} class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
+    return`<th data-key="${c.key}"${align} class="${activeSort?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
   }).join('')+'</tr>';
   // Drag-to-reorder columns; the saved order re-enters through getCols() (v536).
   attachColDrag(document.getElementById('tHead').parentElement,'main-rankings',()=>{COLS=getCols();renderHead();renderTable();});
@@ -12308,6 +12309,7 @@ function patchRankingBody(html){
 }
 function renderTable(){
   renderLiveTapeBar();
+  const defaultRanks=floorModel()==='AVWAP_CROSS'?defaultRankMap(ALL):null;
   const capital=getEffectiveCapital();
   // Allocation only across SELECTED instruments
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
@@ -12342,6 +12344,7 @@ function renderTable(){
     // user-reordered) header (v536).
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
+      defaultRank:`<td data-key="defaultRank" style="font-family:monospace;text-align:right" title="Position in the model default order">${defaultRanks?.get(s.symbol)??'-'}</td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       sessionVwap:`<td data-key="sessionVwap">${avwapTableCell(s,'sessionVwap')}</td>`,
       anchoredVwap:`<td data-key="anchoredVwap">${avwapTableCell(s,'anchoredVwap')}</td>`,
@@ -12465,7 +12468,8 @@ function goP(p){PG=p;renderTable();scrollToSection('tHead');}
 // clicking the same header again reverses it. Score remains the DEFAULT (and the order the
 // recommendation logic assumes), it is simply no longer the only possibility.
 function doSort(key){
-  if(key){
+  if(key==='defaultRank'){SCOL='score';SDIR=-1;SORT_EXPLICIT=false;}
+  else if(key){
     if(SCOL===key) SDIR=-SDIR; else{SCOL=key;SDIR=-1;}
     SORT_EXPLICIT=true;
   }
@@ -12574,6 +12578,9 @@ function compareModelScoreRows(a,b){
 
   const ap = Number(a.day ?? a.priceChange ?? 0), bp = Number(b.day ?? b.priceChange ?? 0);
   return (bp - ap) || String(a.symbol).localeCompare(String(b.symbol));
+}
+function defaultRankMap(rows){
+  return new Map([...rows].filter(r=>!r._us).sort(compareModelScoreRows).map((r,i)=>[r.symbol,i+1]));
 }
 function sortDisplayRows(rows){
   if(SCOL==='score')return rows.sort(compareModelScoreRows);

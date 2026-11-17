@@ -1,10 +1,11 @@
-# Active Task: Deployed v1746 / Operational
+# Active Task: Deployed v1747 / Operational
 
-Rocket Scanner v1746 deployed at 2026-11-17 16:09 IST. System operational and in sync with origin/master.
+Rocket Scanner v1747 deployed at 2026-11-17 16:17 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1747:** Add clickable Default rank column to restore model ordering and remove redundant AVWAP signal candle column
 - **v1746:** Keep AVWAP candle diagnostics after stream disconnect and explain excluded, loading and missing history states
 - **v1745:** Use lower stock price to break AVWAP entry status and crossover proximity ties
 - **v1744:** Sort AVWAP model by entry status and nearest upward crossover instead of score or RVOL
