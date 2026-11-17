@@ -74,3 +74,10 @@
 - Preserve prior-close continuous-return learning (`mrmr-prior-close-return-v2`) and the 218-indicator schema. Use real completed session candles for technical inference, with no appended flat quote candle; await the first completed session candle. Live price/depth and exchange VWAP remain authoritative for entry readiness.
 - Session VWAP participation, dispersion and slopes exclude prior sessions. ADX uses Wilder smoothing, MACD histogram slope compares historical histograms, and named EMA9 inputs use period 9.
 - Validate all 52 Ensemble semantic weight mappings against canonical indicator names and reject missing mappings. Indicator contract `mrmr-completed-indicators-20261117-v1` is mandatory for fresh snapshots and model caches; reject legacy indicator snapshots. No chase/volume research cutoffs, hand-set weights, allocation or exit changes were approved in this correction.
+
+## VWAP / T-2 AVWAP Cross model - owner, 17 November 2026
+
+- Separate AVWAP_CROSS model: existing universal hard filters, then binary upward crossover of session VWAP over AVWAP anchored at T-2 trading-session open. No mRMR score or indicator guards.
+- Both signal lines use completed 5-minute HLC/3-volume bars; previous session-candle VWAP <= AVWAP and latest VWAP > AVWAP. No overnight comparison, no forming candles, no first or last session candle. Signal expires at the next candle close.
+- Require T-2/T-1 history and current-session data; exchange calendar determines anchor and candle boundaries. Exchange VWAP/live quotes/depth remain execution inputs. Shared allocation and trailing exits apply; passing stocks have equal binary score 1.
+- CUM removed from the visible dropdown; saved strategy is not silently switched. Original mRMR and combined model are unchanged.

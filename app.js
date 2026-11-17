@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 14:09 IST'; // release build date (IST)
-const APP_VERSION=1741;
+const BUILD_TS='2026-11-17 15:11 IST'; // release build date (IST)
+const APP_VERSION=1742;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='MRMR'?'Original mRMR':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='MRMR'?'Original mRMR':v==='AVWAP_CROSS'?'VWAP / T-2 AVWAP Cross (5m)':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
@@ -3743,7 +3743,7 @@ function modelBadgeHtml(model,note=''){
 }
 function enabledModelsLabel(){
   const m = selectedBtstModel();
-  return m==='MARKOV_3PCT'?'Markov / mRMR / Ensemble':m==='MRMR'?'Original mRMR':(m==='CUM'?'Cumulative Change':m);
+  return m==='AVWAP_CROSS'?'VWAP / T-2 AVWAP Cross (5m)':m==='MARKOV_3PCT'?'Markov / mRMR / Ensemble':m==='MRMR'?'Original mRMR':(m==='CUM'?'Cumulative Change':m);
 }
 function dualScoreCell(row){
   const act = getRowActionState(row);
@@ -3817,6 +3817,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
+  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: completed 5m session VWAP crosses above HLC/3 AVWAP anchored at T-2 session open. First and last candles excluded. Equal allocation across passing stocks.';
   if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
@@ -4460,7 +4461,8 @@ function scoreFloorStore(model=floorModel()){return model==='CUM'?'rs_cumulative
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),wrap=document.getElementById('scoreFloorWrap'),model=floorModel();
-    if(wrap)wrap.style.display=model==='CUM'?'none':'';
+    if(wrap)wrap.style.display=['CUM','AVWAP_CROSS'].includes(model)?'none':'';
+    if(model==='AVWAP_CROSS'){if(el){el.value='1';el.readOnly=true;}_scoreFloorSeeded=model;return;}
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     el.readOnly=model==='MARKOV_3PCT';
     if(model==='MARKOV_3PCT'){
@@ -4735,6 +4737,7 @@ async function loadEntryTriggers(){
   }finally{loadEntryTriggers.busy=false;}
 }
 function entryTriggerView(model){
+  if(model==='AVWAP_CROSS'){const src=BTST.rank?.activeModel===model?BTST.rank:BTST.data;return {crossingsKnown:src?.activeModel===model,crossed:new Set(src?.crossings||[]),armed:{}};}
   const p=ENTRY_TRIGGERS,now=Date.now();
   const known=!!p&&p.day===getSessionDate()&&p.model===model&&now-p.at<=60000;
   return {crossingsKnown:known,
@@ -4849,7 +4852,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov · mRMR · Ensemble',MRMR:'Original mRMR',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',AVWAP_CROSS:'VWAP / T-2 AVWAP Cross (5m)',MARKOV_3PCT:'Markov · mRMR · Ensemble',MRMR:'Original mRMR',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4859,7 +4862,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['CUM','MARKOV_3PCT','MRMR'];
+const SELECTABLE_MODELS=['AVWAP_CROSS','MARKOV_3PCT','MRMR'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4886,7 +4889,7 @@ function syncSelectedModelFromHelper(){
     rememberModelChoice(model);
     RocketStrategy?.applySelectedModel(model);
     const brandTag=document.querySelector('.brand-tag');
-    if(brandTag)brandTag.textContent=model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Prior-Close Return Learning':'CUM - VWAP Trend & Breadth';
+    if(brandTag)brandTag.textContent=model==='AVWAP_CROSS'?'5m VWAP crosses above T-2 AVWAP':model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Prior-Close Return Learning':'CUM - VWAP Trend & Breadth';
     if(changedModel)initScoreFloorUI(true);
     refreshBtstModelView();
     _strategySyncSignature=model;
@@ -4899,7 +4902,7 @@ function initModelUI(){
     if(_modelSeeded) return;
     _modelSeeded=true;
     const el=document.getElementById('fModel');
-    if(el) el.value=savedModelChoice()||'CUM';
+    if(el) el.value=savedModelChoice()||'MRMR';
     initScoreFloorUI(true);   // the floor box follows the model just restored
     syncSelectedModelFromHelper();
     if (!window._selectedModelPollActive) {
@@ -4917,7 +4920,7 @@ function initModelUI(){
 async function onModelChange(){
   const el=document.getElementById('fModel'),m=el?.value;
   if(!SELECTABLE_MODELS.includes(m)||_modelSwitchPending)return;
-  const previous=savedModelChoice()||'CUM';
+  const previous=savedModelChoice()||'MRMR';
   el.value=previous;el.disabled=true;_modelChoiceEpoch++;_modelSwitchPending=true;
   try{
     let data;
@@ -4951,11 +4954,11 @@ async function onModelChange(){
 // The model new orders are ranked and targeted on: the dropdown (helper-confirmed), else the saved choice.
 function selectedBtstModel(){
   const v=document.getElementById('fModel')?.value;
-  return SELECTABLE_MODELS.includes(v)?v:(savedModelChoice()||'CUM');
+  return SELECTABLE_MODELS.includes(v)?v:(savedModelChoice()||'MRMR');
 }
 function refreshBtstModelView(){
   _btstRankMemo=null;
-  if(!SORT_EXPLICIT&&(floorModel()==='CUM'||floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR')){SCOL='score';SDIR=-1;}
+  if(!SORT_EXPLICIT&&(floorModel()==='CUM'||floorModel()==='AVWAP_CROSS'||floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR')){SCOL='score';SDIR=-1;}
   for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
   _dualPlanMemo=null;
   if(ALL.length)applyFilters({preservePage:true});
@@ -4986,6 +4989,7 @@ function btstEngineMinScore(){
 }
 // What the screen judges against: the override when typed, otherwise the engine's own floor.
 function btstMinScore(){
+  if(floorModel()==='AVWAP_CROSS')return 1;
   if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
   if(floorModel()==='MARKOV_3PCT'){
     return BTST.data?.selection?.cutoff??BTST.rank?.selection?.cutoff??0;
@@ -5339,6 +5343,17 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const price=Number(s.price),targetPct=currentModelTargetPct();
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
     return {...decision,targetPrice:+(price*(1+targetPct/100)).toFixed(2),stopPrice:null,targetPct,stopLossPct:0};
+  }
+  if(floorModel()==='AVWAP_CROSS'){
+    const sym=normSym(s.symbol);
+    if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
+    const decision=RocketStrategy.avwapEntryState(btstRanking()?.src,sym);
+    if(decision.state!=='GO')return decision;
+    const ready=RocketStrategy.memQuoteState(_universeMap.get(s.symbol),Date.now());
+    if(ready.state!=='READY')return ready;
+    const targetPct=currentModelTargetPct();
+    return {...decision,targetPrice:+(s.price*(1+targetPct/100)).toFixed(2),stopPrice:null,targetPct,stopLossPct:0};
   }
   if(floorModel()==='MRMR'){
     const source=BTST.data||BTST.rank,sym=normSym(s.symbol);
@@ -11133,17 +11148,17 @@ function getClockRunwayRead(row,opts){
 // v1446: the one place a non-order-specific target comes from - the selected model's evolving
 // base target, +3% only as its labelled startup fallback when the tracker has not loaded.
 function currentModelTargetPct(){
-  if(floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR') return 1.25 + (executionControls?.targetExtraPct ?? 0);
+  if(floorModel()==='AVWAP_CROSS'||floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR') return 1.25 + (executionControls?.targetExtraPct ?? 0);
   const t=learnedBtstTarget(null);
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
-  if(floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR') return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:floorModel(),method:'markov_trailing',n:0,through:null};
+  if(floorModel()==='AVWAP_CROSS'||floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR') return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:floorModel(),method:'markov_trailing',n:0,through:null};
   return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
 
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
-  if(floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR'){
+  if(floorModel()==='AVWAP_CROSS'||floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR'){
     const tgt = 1.25 + (executionControls?.targetExtraPct ?? 0);
     return {
       targetPct: tgt,
@@ -11862,7 +11877,7 @@ let _usPlanMemo=null;
 function usPlan(){
   const d=US_FEED.data,cap=usCapital(),fl=usFloor(),pct=typeof getMaxAllocPct==='function'?getMaxAllocPct():100,live=usFeedLive();
   const ibkr=usIbkrPlan();
-  const isTrailing=d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR'].includes(d?.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT','MRMR'].includes(floorModel()));
+  const isTrailing=d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR','AVWAP_CROSS'].includes(d?.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT','MRMR','AVWAP_CROSS'].includes(floorModel()));
   const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
   const trailGap=(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.dynamicTrailGapPct==='function')
     ?RocketStrategy.dynamicTrailGapPct(mlot)
@@ -12088,7 +12103,7 @@ function usRows(){
   if(!d||!d.ok) return [];
   const fl=usFloor(),live=usFeedLive();
   const q=(document.getElementById('fSearch')?.value||'').trim().toUpperCase();
-  const isTrailing=d.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR'].includes(d.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT','MRMR'].includes(floorModel()));
+  const isTrailing=d.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR','AVWAP_CROSS'].includes(d.model)||(typeof floorModel==='function'&&['CUM','MARKOV_3PCT','MRMR','AVWAP_CROSS'].includes(floorModel()));
   const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
   const trailGap=(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.dynamicTrailGapPct==='function')
     ?RocketStrategy.dynamicTrailGapPct(mlot)
@@ -12120,7 +12135,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
+  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'Completed 5m VWAP / T-2 AVWAP upward crossover':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
@@ -12130,7 +12145,7 @@ function dashboardMarketCards(){
     const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'Native strategy';
     add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'}${floorModel()==='CUM'?' · Binary Pass/Fail':''}` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation');
+    add(2,'NSE',`${go} GO`,floorModel()==='AVWAP_CROSS'?'Hard filters + confirmed 5m upward crossover (first/last candles excluded)':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
     if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','No minimum hold; no maximum');
@@ -12144,7 +12159,7 @@ function dashboardMarketCards(){
     add(1,'US',escHtml(stratName),`${d?.ok?d.universe??d.ranking?.length??0:0} scored · ${d?.ranking?.length??0} rows published`);
     const go=d?.ok&&usFeedLive()?(d.ranking||[]).filter(r=>typeof r.eligible==='boolean'?r.eligible:(Number.isFinite(Number(r.score))&&Number(r.score)>=usFloor())).length:0;
     add(2,'US',`${go} GO`,'Suggestions · manual IBKR trades');
-    if(d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR'].includes(d?.model))add(3,'US','RS trailing exit','No minimum hold; no maximum');
+    if(d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','MARKOV_3PCT','MRMR','AVWAP_CROSS'].includes(d?.model))add(3,'US','RS trailing exit','No minimum hold; no maximum');
     else add(3,'US',signed(Number(d?.rules?.targetPct)||3),'Suggested target · no automated protection');
   }
   return groups.map((rows,i)=>`<div class="st"><div class="st-l">${['Market context','Active Strategy','Qualification','Targets'][i]}</div><div style="font-size:15px;line-height:1.7">${rows.join('')}</div></div>`).join('');
@@ -12189,7 +12204,7 @@ async function loadUsFeed(){
   if(brokerPanel&&!brokerPanel.contains(document.activeElement))brokerPanel.innerHTML=buildUsPositionsPanel();
   try{
     const model=typeof floorModel==='function'?floorModel():'CUM';
-    const useUnified=(model==='CUM'||model==='MARKOV_3PCT'||model==='MRMR');
+    const useUnified=(model==='AVWAP_CROSS'||model==='CUM'||model==='MARKOV_3PCT'||model==='MRMR');
     let d=null;
     if(useUnified){
       try{
@@ -14151,6 +14166,7 @@ function emptyBoardReason(){
     if(!selected?.topSymbols?.length)return 'No positive Ensemble candidates in the current market snapshot.';
     return 'No executable recommendations: the top-five positive shortlist is waiting for live VWAP, quote or account eligibility. Use Show ineligible to inspect the failed stage.';
   }
+  if(floorModel()==='AVWAP_CROSS')return 'Waiting for a confirmed 5m VWAP crossover above T-2 AVWAP after hard filters. First and last candles excluded. Use Show ineligible for reasons.';
   if(floorModel()==='MRMR'){
     const source=BTST.data||BTST.rank,mrmr=source?.mrmr;
     if(!mrmr?.ok)return 'Awaiting Original mRMR prior-close return scores: '+escHtml(mrmr?.reason||'218-indicator worker is computing')+'.';

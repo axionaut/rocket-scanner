@@ -1021,6 +1021,33 @@ function bookedSession(session,holdingCosts,tradebook){
       return `Heavy selling volume: ${Math.round(g.sellVolShare*100)}% of last ${MRMR_GUARD.window} min volume on down bars at ${Number(g.volRatio).toFixed(1)}x normal while falling`;
     return null;
   }
+  // Binary crossover, observed only at completed five-minute closes. No overnight comparison.
+  function avwapCrossSignal(bars, session, anchor, now=Date.now(), bounds=null) {
+    let ap=0,av=0,sp=0,sv=0,previous=null,last=null;
+    const seen=new Set();
+    for(const r of [...bars].sort((a,b)=>String(a[0]).localeCompare(String(b[0])))){
+      const key=String(r[0]),day=key.slice(0,10),end=Date.parse(key.replace(' ','T')+'+05:30')+300000;
+      if(day<anchor||day>session||end>now||seen.has(key))continue;
+      seen.add(key);
+      const v=Number(r[5]),tp=(Number(r[2])+Number(r[3])+Number(r[4]))/3;
+      if(!(v>=0&&tp>0&&Number.isFinite(v)&&Number.isFinite(tp)))return {triggered:false,reason:'Invalid OHLCV history'};
+      ap+=tp*v;av+=v;
+      if(day===session){sp+=tp*v;sv+=v;if(sv>0&&av>0){previous=last;last={key,end,vwap:sp/sv,avwap:ap/av};}}
+    }
+    if(!previous||!last)return {triggered:false,reason:'Awaiting two completed session candles'};
+    const startMinute=Number(last.key.slice(11,13))*60+Number(last.key.slice(14,16));
+    const allowed=!!bounds&&startMinute>bounds.open&&startMinute+5<bounds.close;
+    const triggered=allowed&&now>=last.end&&now<last.end+300000&&previous.vwap<=previous.avwap&&last.vwap>last.avwap;
+    return {...last,anchor,previous,triggered,expiresAt:last.end+300000,reason:triggered?'5m session VWAP crossed above T-2 AVWAP':'Awaiting a fresh 5m VWAP crossover above T-2 AVWAP'};
+  }
+  function avwapEntryState(source,symbol,now=Date.now()){
+    const signal=source?.avwap?.signals?.[symbol];
+    if(source?.activeModel!=='AVWAP_CROSS'||source?.avwap?.version!=='avwap-t2-5m-v1'||source.session!==nseClock(now).day)return {state:'WAIT',reason:'Awaiting current AVWAP crossover data'};
+    const age=now-Date.parse(source.avwap.asOf);
+    if(!(age>=0&&age<=30000)||!signal?.triggered||now<signal.end||now>=signal.expiresAt)return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Awaiting a fresh 5m VWAP crossover'};
+    if(!source.crossings?.includes(symbol))return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Hard filters or execution readiness pending'};
+    return {state:'GO',score:1,reason:signal.reason};
+  }
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
   function entryGateApplies(){
     return false;
@@ -1028,13 +1055,13 @@ function bookedSession(session,holdingCosts,tradebook){
 
   function applySelectedModel(model) {
     const selected=String(model||'CUM').toUpperCase();
-    if(!['CUM','MARKOV_3PCT','ENS','PATH','MRMR'].includes(selected))throw Error('Unknown selected model');
+    if(!['CUM','MARKOV_3PCT','ENS','PATH','MRMR','AVWAP_CROSS'].includes(selected))throw Error('Unknown selected model');
     CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;
   }
 
   return {
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
-    applySelectedModel,
+    applySelectedModel,avwapCrossSignal,avwapEntryState,
     entryScoreCapped,
     MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,
