@@ -1,10 +1,11 @@
-# Active Task: Deployed v1735 / Operational
+# Active Task: Deployed v1736 / Operational
 
-Rocket Scanner v1735 deployed at 2026-11-17 10:03 IST. System operational and in sync with origin/master.
+Rocket Scanner v1736 deployed at 2026-11-17 10:08 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1736:** Restore today-only profit funding and enforce all loss reservations
 - **v1735:** Retry Windows-locked minute-history replacements and serialize per-stock writes
 - **v1734:** Automatically set Target addition from the shared MLoT history weighted median
 - **v1733:** Make Min and Max allocation budgets inclusive of buy fees and whole-share rounding

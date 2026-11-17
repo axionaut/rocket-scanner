@@ -396,7 +396,7 @@
 
       // Deficit-aware partial sizing bounded by profit underwriting budget in absolute rupees.
       const lossPerShare = Math.max(0.01, avgCost - sellPrice);
-      const maxSharesByLoss = maxLossRs > 0 ? Math.floor(maxLossRs / lossPerShare) : (isZombie ? settledQty : 0);
+      const maxSharesByLoss = maxLossRs > 0 ? Math.floor(maxLossRs / lossPerShare) : 0;
       if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
 
       const effectiveUsableLtp = sellPrice * usableCreditFactor;
@@ -433,7 +433,7 @@
       const economics=swapEconomics(avgCost,sellPrice,sharesToSell,buyerPx,finalBuyerShares,targetPct);
       if(!economics)continue;
       const totalLossWithFees = economics.lossRs + economics.sellFees;
-      if (maxLossRs > 0 ? (totalLossWithFees > maxLossRs + 1e-9) : (!isZombie || economics.buyerPotentialGain + 1e-9 < economics.lossRs)) continue;
+      if (totalLossWithFees > maxLossRs + 1e-9) continue;
       const {lossRs,buyerPotentialGain}=economics;
       const totalUnrealizedLossRs = (avgCost - ltp) * settledQty;
       const ler = liberatedUsable / (lossRs || 1);

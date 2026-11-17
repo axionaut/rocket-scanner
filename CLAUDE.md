@@ -7,7 +7,7 @@ Owner workflow update (13 November 2026). Work directly unless the owner explici
 This document is the single source of truth for how Rocket Scanner works **today**: architecture, trading rules and the release workflow. Keep it current: when a release changes behaviour, edit the section it changes; do not append a changelog here.
 
 
-Current version: **v1735** (2026-11-17). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
+Current version: **v1736** (2026-11-17). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
 
 StratGen research controls read only the current form: fixed shared_rs exits, selected history and auto-refine. Removed target/horizon controls are never accessed; older saved controls retain their supported history and auto-refine values, and running-job display uses the shared-exit summary. SDL is verified through its actual UI start handler into a live research worker.
 
@@ -250,3 +250,5 @@ Hide ineligible (v1594): all eligible GO stocks remain visible, including those 
 4 Nov v1629 owner correction: no sample-count/profitability/validation eligibility gate. Rank every completed backtest by realized plus unrealized net P/L / declared sizing reference. Remove insufficient/unverified evidence badges. Generate Once must generate AND backtest in one job; discovery must not duplicate that run. CUM is a permanent benchmark row; owner approved the explicitly labeled one-minute historical reconstruction over the same year. Native live CUM remains ten-second exchange-VWAP logic. StratGen now renders directly in RS with isolated styles/script scope, without an iframe; dialogs use the full browser viewport.
 
 4 Nov v1630: research interrupted by helper/service restart automatically starts again from its saved request, capped at three recovery attempts. Explicit cancellation, normal completion, timeout and calculation failure do not automatically rerun. Completed Gemini generation is staged as a backtest request before testing. Recovery restarts computation from the beginning; there is no per-symbol checkpoint yet. UI shows FAILED distinctly from service readiness and reports loading/backtesting phases; native CUM is not labeled as a stopped custom live worker.
+
+Owner override, 17 November 2026: profit-funded loss allowance uses today only. Configured share of today?s winning net less all today?s booked losing net, active reservations and the Rs5 estimate cushion. No previous session contributes; zero allowance blocks loss-bearing swaps including legacy renewal exemptions. Live and replay use the same calculation.

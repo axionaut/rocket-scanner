@@ -36,7 +36,7 @@
 ## Unified Profit-Underwritten Opportunity Swap (PUOS) Policy - owner, 11 November 2026
 
 - Standalone trims to cash are retired. The system never sells underwater holdings merely to hold idle cash.
-- Realized net profits from the 5-session rolling pool (configured via `Loss trim budget %`) strictly underwrite Opportunity Swaps.
+- Realized booked profits from today only (no prior-session carryover) (configured via `Loss trim budget %`) strictly underwrite Opportunity Swaps.
 - An Opportunity Swap is only permitted if the sacrifice loss is fully covered by available booked net profit (`LOSS_BUDGET.available()`). Zero banked profit completely blocks loss-bearing swaps to preserve account principal.
 - An asymmetric expectancy hurdle is enforced: the incoming buyer's potential target gain must be >= the sacrifice's realized loss. Sacrifices are resized to smaller partial trims if necessary so the trade is net positive upon reaching target.
 - Profitable runners are strictly protected and never sacrificed.
