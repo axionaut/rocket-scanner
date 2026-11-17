@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 11:49 IST'; // release build date (IST)
-const APP_VERSION=1738;
+const BUILD_TS='2026-11-17 12:02 IST'; // release build date (IST)
+const APP_VERSION=1739;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5331,6 +5331,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const floor=Number.isFinite(btstMinScore())?btstMinScore():65;
     if(!Number.isFinite(score))return {state:'WAIT',reason:'Awaiting mRMR score for '+sym};
     if(score<floor)return {state:'WAIT',reason:`mRMR score ${score.toFixed(1)} below floor ${floor}`};
+    const guardWhy=source.watchlist?.[sym]?.guard;
+    if(guardWhy)return {state:'WAIT',reason:guardWhy};
     const price=Number(s.price),targetPct=currentModelTargetPct();
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
     return {

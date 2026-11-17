@@ -64,3 +64,7 @@
 ## Automatic target addition - owner, 17 November 2026
 
 - Target + % automatically follows the MLoT history total weighted median, using the same covered-stock-weighted harmonic calculation and two-decimal rounding as the displayed total. The field is read-only. Retain the last available target while history loads.
+
+## MRMR entry guards - owner, 17 November 2026
+
+- Original mRMR entries (score at or above floor) additionally require: (1) VWAP basing - a stock below session VWAP must have crossed it at least twice today; (2) no heavy selling volume - last 15 one-minute bars net down, at least 60% of their volume on down bars and bar volume at least 1.5x the session norm blocks entry. Metrics come from the mRMR worker's 1-minute bars; both guards are skipped until 15 session bars exist. Shared by the page and broker authorisation via picks/crossings (S.mrmrEntryGuard).

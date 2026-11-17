@@ -1006,6 +1006,19 @@ function bookedSession(session,holdingCosts,tradebook){
     return {state:'GO',reason:'Top-five positive Ensemble candidate; fresh VWAP entry confirmed'};
   }
 
+  // 17 Nov 2026 (owner): two MRMR entry guards from the 16 Nov loss review. Metrics are computed by the
+  // mRMR worker from today's 1-minute bars; the guard is skipped until 15 session bars exist.
+  //  - VWAP basing: a stock still below session VWAP must have crossed it at least twice today.
+  //  - Heavy selling volume: last 15 bars net down, >=60% of their volume on down bars, and bar volume >=1.5x the session norm.
+  const MRMR_GUARD = Object.freeze({minBars:15,minCrossings:2,window:15,sellShare:0.6,volRatio:1.5});
+  function mrmrEntryGuard(g) {
+    if(!g||!(Number(g.bars)>=MRMR_GUARD.minBars))return null;
+    if(Number(g.price)<Number(g.vwap)&&Number(g.vwapCross)<MRMR_GUARD.minCrossings)
+      return `Below VWAP with only ${g.vwapCross} VWAP crossing(s) today; needs ${MRMR_GUARD.minCrossings} to show basing`;
+    if(g.falling&&Number(g.sellVolShare)>=MRMR_GUARD.sellShare&&Number(g.volRatio)>=MRMR_GUARD.volRatio)
+      return `Heavy selling volume: ${Math.round(g.sellVolShare*100)}% of last ${MRMR_GUARD.window} min volume on down bars at ${Number(g.volRatio).toFixed(1)}x normal while falling`;
+    return null;
+  }
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
   function entryGateApplies(){
     return false;
@@ -1021,7 +1034,7 @@ function bookedSession(session,holdingCosts,tradebook){
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
     applySelectedModel,
     entryScoreCapped,
-    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,selectMemCandidates,memEntryState,memQuoteState,
+    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,
     CUM_REFINEMENT,
     cumRefinementReason,

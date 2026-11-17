@@ -1,10 +1,11 @@
-# Active Task: Deployed v1738 / Operational
+# Active Task: Deployed v1739 / Operational
 
-Rocket Scanner v1738 deployed at 2026-11-17 11:49 IST. System operational and in sync with origin/master.
+Rocket Scanner v1739 deployed at 2026-11-17 12:02 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1739:** Add MRMR entry guards: VWAP basing and heavy-selling-volume block
 - **v1738:** Remove unintended initial SL draft and restore profit-funded trims while preserving v1737 entry changes
 - **v1737:** Retire pre-entry offer cap, VWAP anti-chase band and redundant pick gate after combined-model shortlist
 - **v1736:** Restore today-only profit funding and enforce all loss reservations
