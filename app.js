@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 16:02 IST'; // release build date (IST)
-const APP_VERSION=1745;
+const BUILD_TS='2026-11-17 16:09 IST'; // release build date (IST)
+const APP_VERSION=1746;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5316,6 +5316,15 @@ function liveMarketBreadth(){
 function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
   if(typeof RocketStrategy==='undefined') return {state:'BLOCKED', reason:'Strategy module unavailable'};
+  if(floorModel()==='AVWAP_CROSS'){
+    const signal=avwapTableSignal(s),why=surveillanceBlockReason(s.symbol);
+    if(why)return {state:'BLOCKED',reason:why};
+    if(s.basketEligible===false)return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
+    if(signal?.state==='excluded')return {state:'BLOCKED',reason:signal.reason};
+    if(!(Number(s.price)>=5&&Number(s.price)<=100000))return {state:'BLOCKED',reason:'Price outside model universe (Rs 5 to Rs 100,000)'};
+    const bounds=RocketStrategy.nseSession(getSessionDate(),null,s.symbol),minute=RocketStrategy.nseClock().minute;
+    if(!ignoreMarketClosed&&bounds&&(minute<bounds.open||minute>=bounds.close))return {state:'WAIT',reason:'NSE market is closed; showing completed-candle values'};
+  }
   if(!ignoreMarketClosed&&!isEquitySession(Date.now(),s.symbol))return {state:'WAIT',reason:'NSE market is closed'};
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
   if(stale)return {state:'WAIT',reason:stale};
@@ -5598,7 +5607,11 @@ function avwapTableCell(s,key){
     const gap=100*(signal.vwap/signal.avwap-1);
     return `<span style="font-family:monospace;color:var(--${gap>0?'green':'amber'})">${gap>0?'+':''}${gap.toFixed(2)}%</span>`;
   }
-  if(!signal?.key)return '<span style="color:var(--t3)">History pending</span>';
+  if(!signal?.key){
+    const label=signal?.state==='excluded'?'Not evaluated':signal?.state==='missing'?'History missing':signal?.state==='loading'?'Loading candles':'No model data';
+    const reason=signal?.reason||'Awaiting the current model snapshot';
+    return `<span style="font-size:12px;color:var(--t3)" title="${escHtml(reason)}">${label}</span><div style="font-size:11px;color:var(--t3);max-width:230px">${escHtml(reason)}</div>`;
+  }
   const time=signal.key.slice(11,16),close=liveTapeTime(signal.end).slice(0,5);
   const fresh=Date.now()<signal.expiresAt;
   const relation=signal.triggered?(fresh?'Crossed up':'Crossover expired'):signal.vwap>signal.avwap?'Above / no new cross':'Below or equal / no cross';
