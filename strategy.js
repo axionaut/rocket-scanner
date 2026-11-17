@@ -1044,7 +1044,9 @@ function bookedSession(session,holdingCosts,tradebook){
     const signal=source?.avwap?.signals?.[symbol];
     if(source?.activeModel!=='AVWAP_CROSS'||source?.avwap?.version!=='avwap-t2-5m-v1'||source.session!==nseClock(now).day)return {state:'WAIT',reason:'Awaiting current AVWAP crossover data'};
     const age=now-Date.parse(source.avwap.asOf);
-    if(!(age>=0&&age<=30000)||!signal?.triggered||now<signal.end||now>=signal.expiresAt)return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Awaiting a fresh 5m VWAP crossover'};
+    if(!(age>=0&&age<=30000))return {state:'WAIT',reason:'Crossover data stale; awaiting current update'};
+    if(signal?.triggered&&now>=signal.expiresAt)return {state:'WAIT',reason:'Crossover expired; awaiting a new upward crossing'};
+    if(!signal?.triggered||now<signal.end)return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Awaiting a fresh 5m VWAP crossover'};
     if(!source.crossings?.includes(symbol))return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Hard filters or execution readiness pending'};
     return {state:'GO',score:1,reason:signal.reason};
   }

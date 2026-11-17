@@ -1,10 +1,11 @@
-# Active Task: Deployed v1742 / Operational
+# Active Task: Deployed v1743 / Operational
 
-Rocket Scanner v1742 deployed at 2026-11-17 15:11 IST. System operational and in sync with origin/master.
+Rocket Scanner v1743 deployed at 2026-11-17 15:27 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1743:** Fix AVWAP evidence in live page updates and replace binary scores with crossover table columns
 - **v1742:** Add separate 5m VWAP over T-2 AVWAP crossover model excluding first and last candles; remove CUM from dropdown
 - **v1741:** Fix strategy-switch confirmation timeouts and remove repeated mRMR payloads
 - **v1740:** Correct mRMR indicator formulas, completed-candle inputs and all Ensemble weight mappings

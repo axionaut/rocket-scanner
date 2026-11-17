@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 15:11 IST'; // release build date (IST)
-const APP_VERSION=1742;
+const BUILD_TS='2026-11-17 15:27 IST'; // release build date (IST)
+const APP_VERSION=1743;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3746,6 +3746,7 @@ function enabledModelsLabel(){
   return m==='AVWAP_CROSS'?'VWAP / T-2 AVWAP Cross (5m)':m==='MARKOV_3PCT'?'Markov / mRMR / Ensemble':m==='MRMR'?'Original mRMR':(m==='CUM'?'Cumulative Change':m);
 }
 function dualScoreCell(row){
+  if(!row._us&&floorModel()==='AVWAP_CROSS')return avwapTableCell(row,'cross');
   const act = getRowActionState(row);
   const ms = !row._us&&floorModel()==='MARKOV_3PCT'?(act.state==='GO'?btstScoreOf(row.symbol):null):btstScoreOf(row.symbol) ?? (Number.isFinite(Number(row.score)) ? Number(row.score) : null);
   const scoreText = Number.isFinite(ms) ? (Math.abs(ms) >= 10 ? ms.toFixed(1) : (ms >= 0 ? '+' : '') + ms.toFixed(2)) : null;
@@ -4958,6 +4959,7 @@ function selectedBtstModel(){
 }
 function refreshBtstModelView(){
   _btstRankMemo=null;
+  renderHead();
   if(!SORT_EXPLICIT&&(floorModel()==='CUM'||floorModel()==='AVWAP_CROSS'||floorModel()==='MARKOV_3PCT'||floorModel()==='MRMR')){SCOL='score';SDIR=-1;}
   for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
   _dualPlanMemo=null;
@@ -5581,7 +5583,29 @@ function rowStatusPillHtml(s){
   return `<span class="info-pill pill-${act.armed?'amber':tone}" title="${escHtml(full)}">${label}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
     +(line?`<div style="font-size:12px;color:var(--${act.state==='GO'&&reason?'amber':'t3'})" title="${escHtml(full)}">${escHtml(line)}</div>`:'');
 }
+function avwapTableSignal(s){
+  if(s?._us)return null;
+  const src=btstRanking()?.src;
+  return src?.activeModel==='AVWAP_CROSS'?src.avwap?.signals?.[normSym(s.symbol)]:null;
+}
+function avwapTableCell(s,key){
+  const signal=avwapTableSignal(s),none='<span style="color:var(--t3)">-</span>';
+  if(s?._us)return none;
+  if(key==='sessionVwap')return Number.isFinite(signal?.vwap)?fmtINR(signal.vwap):none;
+  if(key==='anchoredVwap')return Number.isFinite(signal?.avwap)?fmtINR(signal.avwap)+`<div style="font-size:11px;color:var(--t3)">Anchor ${escHtml(signal.anchor)}</div>`:none;
+  if(key==='vwapGap'){
+    if(!(signal?.avwap>0&&Number.isFinite(signal.vwap)))return none;
+    const gap=100*(signal.vwap/signal.avwap-1);
+    return `<span style="font-family:monospace;color:var(--${gap>0?'green':'amber'})">${gap>0?'+':''}${gap.toFixed(2)}%</span>`;
+  }
+  if(!signal?.key)return '<span style="color:var(--t3)">History pending</span>';
+  const time=signal.key.slice(11,16),close=liveTapeTime(signal.end).slice(0,5);
+  const fresh=Date.now()<signal.expiresAt;
+  const relation=signal.triggered?(fresh?'Crossed up':'Crossover expired'):signal.vwap>signal.avwap?'Above / no new cross':'Below or equal / no cross';
+  return `<div style="font-size:12px;color:var(--${signal.triggered&&fresh?'green':'t3'})">${escHtml(relation)}</div><div style="font-size:11px;color:var(--t3)">${time} - ${close} IST</div>`;
+}
 function crossCellHtml(s){
+  if(floorModel()==='AVWAP_CROSS')return avwapTableCell(s,'cross');
   const act = getRowActionState(s);
   const k = normSym(s.symbol);
   const first = crossingStore().at[k];
@@ -10594,6 +10618,13 @@ function _renderMethodologyInner(){
 
 // Fixed columns + dynamic top 10 rocket-relevance features (skip empty ones)
 function getCols(){
+  if(floorModel()==='AVWAP_CROSS')return [
+    {key:'chk',label:'',s:0},{key:'symbol',label:'Stock',s:1},
+    {key:'status',label:'Entry status',s:1},{key:'price',label:'Price / Day',s:1},
+    {key:'sessionVwap',label:'5m VWAP',s:1},{key:'anchoredVwap',label:'T-2 AVWAP',s:1},
+    {key:'vwapGap',label:'VWAP gap',s:1},{key:'cross',label:'Signal candle',s:0},
+    {key:'alloc',label:'Allocation',s:1}
+  ];
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     // v1581 (owner 28 Oct): only what the buy/exit decisions use. From High, Buyer/Seller, RelVol, Turnover and the
@@ -12299,6 +12330,9 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
+      sessionVwap:`<td data-key="sessionVwap">${avwapTableCell(s,'sessionVwap')}</td>`,
+      anchoredVwap:`<td data-key="anchoredVwap">${avwapTableCell(s,'anchoredVwap')}</td>`,
+      vwapGap:`<td data-key="vwapGap">${avwapTableCell(s,'vwapGap')}</td>`,
       score:`<td data-key="score" style="text-align:center">${dualScoreCell(s)}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
@@ -12427,6 +12461,7 @@ function doSort(key){
 // Sort value for a column key. Numbers sort numerically, everything else as text; missing values
 // always sink to the bottom regardless of direction, so a blank cell never outranks a real one.
 function sortValueOf(row,key){
+  if(['sessionVwap','anchoredVwap','vwapGap'].includes(key)){const v=avwapTableSignal(row);return key==='sessionVwap'?v?.vwap??null:key==='anchoredVwap'?v?.avwap??null:v?.avwap>0?100*(v.vwap/v.avwap-1):null;}
   if(!row) return null;
   // `Number(undefined) ?? null` is NaN, not null - and one NaN makes every comparison against it
   // false, which silently scrambles the whole sort. Every numeric path returns null or a finite
@@ -13640,6 +13675,7 @@ function patchVisiblePrices(){
         statusCell.innerHTML = rowStatusPillHtml(s);
       }
       const crossCell=tr.querySelector('td[data-key="cross"]');if(crossCell)crossCell.innerHTML=crossCellHtml(s);
+      if(floorModel()==='AVWAP_CROSS')for(const key of ['sessionVwap','anchoredVwap','vwapGap']){const cell=tr.querySelector('td[data-key="'+key+'"]');if(cell)cell.innerHTML=avwapTableCell(s,key);}
       const exitCell=tr.querySelector('td[data-key="exit"]');if(exitCell)exitCell.innerHTML=exitCellHtml(s);
       const signals=strategySignalCells(s);
       for(const [key,value] of Object.entries({highDistance:signals.highDistance,depth:signals.depth,relvol:signals.rvol,turnover:fV(s.turnover)})){const cell=tr.querySelector('td[data-key="'+key+'"]');if(cell)cell.innerHTML=value;}
