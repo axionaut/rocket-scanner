@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-18 12:28 IST'; // release build date (IST)
-const APP_VERSION=1755;
+const BUILD_TS='2026-11-18 15:04 IST'; // release build date (IST)
+const APP_VERSION=1756;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5619,7 +5619,7 @@ function avwapTableCell(s,key){
   }
   const time=signal.key.slice(11,16),close=liveTapeTime(signal.end).slice(0,5);
   const fresh=Date.now()<signal.expiresAt,crossBlocked=signal.crossingAt&&!signal.triggered,jumpStr=Number.isFinite(signal.vwapJumpPct)?`${signal.vwapJumpPct>=0?'+':''}${signal.vwapJumpPct.toFixed(2)}%`:'';
-  const relation=signal.triggered?(fresh?`Crossed up (${jumpStr} \u2191)`:'Crossover expired'):crossBlocked?(signal.vwapUptrend===false?`Crossed / ${signal.vwapRisingBars??0}/4 \u2191`:signal.jumpInBand===false?`Crossed / ${jumpStr||'out of'} band`:'Crossed / 1st-last candle'):signal.vwap>signal.avwap?'Above / no new cross':'Below or equal / no cross';
+  const relation=signal.triggered?(fresh?`Crossed up (${jumpStr} \u2191)`:'Crossover expired'):crossBlocked?(signal.vwapUptrend===false?`Crossed / ${signal.vwapRisingBars??0}/4 \u2191`:signal.jumpInBand===false?`Crossed / ${jumpStr||'out of'} band`:'Crossed / 1st-last candle'):signal.vwap>signal.avwap?'Above / no new cross':`Below / ${signal.vwapRisingBars??0}/4 \u2191`;
   return `<div style="font-size:12px;color:var(--${signal.triggered&&fresh?'green':'t3'})" title="${escHtml(signal.reason||relation)}">${escHtml(relation)}</div><div style="font-size:11px;color:var(--t3)">${time} - ${close} IST</div>`;
 }
 function crossCellHtml(s){
@@ -12568,12 +12568,22 @@ function compareModelScoreRows(a,b){
     const ar=stateRank(a),br=stateRank(b);
     if(ar!==br)return ar-br;
     if(ar===1){
-      const gap=row=>{const s=avwapTableSignal(row);return Number.isFinite(s?.vwap)&&s?.avwap>0?100*(s.vwap/s.avwap-1):null;};
-      const ag=gap(a),bg=gap(b);
+      const sig=row=>avwapTableSignal(row);
+      const sa=sig(a),sb=sig(b);
+      const ag=Number.isFinite(sa?.vwap)&&sa?.avwap>0?100*(sa.vwap/sa.avwap-1):null;
+      const bg=Number.isFinite(sb?.vwap)&&sb?.avwap>0?100*(sb.vwap/sb.avwap-1):null;
       const group=g=>g===null?2:g<=0?0:1;
       const ac=group(ag),bc=group(bg);
       if(ac!==bc)return ac-bc;
-      if(ac===0&&ag!==bg)return bg-ag;
+      if(ac===0){
+        const aAboveVwap=Number(a.price)>=Number(sa?.vwap)?1:0;
+        const bAboveVwap=Number(b.price)>=Number(sb?.vwap)?1:0;
+        if(aAboveVwap!==bAboveVwap)return bAboveVwap-aAboveVwap;
+        const aRise=Math.min(3,Number(sa?.vwapRisingBars)||0);
+        const bRise=Math.min(3,Number(sb?.vwapRisingBars)||0);
+        if(aRise!==bRise)return bRise-aRise;
+        if(ag!==bg)return bg-ag;
+      }
     }
     const ap=Number.isFinite(Number(a.price))&&Number(a.price)>0?Number(a.price):Infinity;
     const bp=Number.isFinite(Number(b.price))&&Number(b.price)>0?Number(b.price):Infinity;

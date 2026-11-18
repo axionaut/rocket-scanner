@@ -1,10 +1,11 @@
-# Active Task: Deployed v1755 / Operational
+# Active Task: Deployed v1756 / Operational
 
-Rocket Scanner v1755 deployed at 2026-11-18 12:28 IST. System operational and in sync with origin/master.
+Rocket Scanner v1756 deployed at 2026-11-18 15:04 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1756:** Flush completed stream candles immediately for all models and prioritize coiled AVWAP WAIT rows
 - **v1755:** Add 0.30-0.50% AVWAP jump sweet spot and editable Target + % override
 - **v1754:** Require 4 contiguous rising candles and rising VWAP for AVWAP_CROSS
 - **v1753:** Require 4-candle session VWAP uptrend for AVWAP_CROSS entries
