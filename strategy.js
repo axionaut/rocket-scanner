@@ -1023,7 +1023,7 @@ function bookedSession(session,holdingCosts,tradebook){
   }
   // Binary crossover, observed only at completed five-minute closes. No overnight comparison.
   function avwapCrossSignal(bars, session, anchor, now=Date.now(), bounds=null) {
-    let ap=0,av=0,sp=0,sv=0,previous=null,last=null;
+    let ap=0,av=0,sp=0,sv=0,previous=null,last=null,priorDay=null,priorPv=0,priorVol=0,priorBar=null;
     const seen=new Set();
     for(const r of [...bars].sort((a,b)=>String(a[0]).localeCompare(String(b[0])))){
       const key=String(r[0]),day=key.slice(0,10),end=Date.parse(key.replace(' ','T')+'+05:30')+300000;
@@ -1032,17 +1032,22 @@ function bookedSession(session,holdingCosts,tradebook){
       const v=Number(r[5]),tp=(Number(r[2])+Number(r[3])+Number(r[4]))/3;
       if(!(v>=0&&tp>0&&Number.isFinite(v)&&Number.isFinite(tp)))return {triggered:false,reason:'Invalid OHLCV history'};
       ap+=tp*v;av+=v;
+      if(day<session){if(priorDay!==day){priorDay=day;priorPv=0;priorVol=0;}priorPv+=tp*v;priorVol+=v;priorBar={key,end};}
       if(day===session){sp+=tp*v;sv+=v;if(sv>0&&av>0){previous=last;last={key,end,vwap:sp/sv,avwap:ap/av};}}
     }
-    if(!previous||!last)return {triggered:false,reason:'Awaiting two completed session candles'};
+    if(!last)return {anchor,...priorBar,vwap:priorVol>0?priorPv/priorVol:null,avwap:av>0?ap/av:null,vwapSession:priorDay,displayOnly:true,triggered:false,reason:'Awaiting the first completed session candle; showing the last completed session'};
+    if(!previous)return {...last,anchor,vwapSession:session,triggered:false,reason:'First session candle displayed; entry disabled on the first candle'};
     const startMinute=Number(last.key.slice(11,13))*60+Number(last.key.slice(14,16));
-    const allowed=!!bounds&&startMinute>bounds.open&&startMinute+5<bounds.close;
+    const minute=nseClock(now).minute;
+    const allowed=!!bounds&&startMinute>bounds.open&&startMinute+5<bounds.close&&minute>=bounds.open+5&&minute<bounds.close-5;
     const triggered=allowed&&now>=last.end&&now<last.end+300000&&previous.vwap<=previous.avwap&&last.vwap>last.avwap;
-    return {...last,anchor,previous,triggered,expiresAt:last.end+300000,reason:triggered?'5m session VWAP crossed above T-2 AVWAP':'Awaiting a fresh 5m VWAP crossover above T-2 AVWAP'};
+    return {...last,anchor,vwapSession:session,previous,triggered,expiresAt:last.end+300000,reason:triggered?'5m session VWAP crossed above T-2 AVWAP':'Awaiting a fresh 5m VWAP crossover above T-2 AVWAP'};
   }
   function avwapEntryState(source,symbol,now=Date.now()){
     const signal=source?.avwap?.signals?.[symbol];
     if(source?.activeModel!=='AVWAP_CROSS'||source?.avwap?.version!=='avwap-t2-5m-v1'||source.session!==nseClock(now).day)return {state:'WAIT',reason:'Awaiting current AVWAP crossover data'};
+    const bounds=nseSession(source.session,null,symbol),minute=nseClock(now).minute;
+    if(!bounds||minute<bounds.open+5||minute>=bounds.close-5)return {state:'WAIT',reason:'Entry disabled outside the permitted session candles'};
     const age=now-Date.parse(source.avwap.asOf);
     if(!(age>=0&&age<=30000))return {state:'WAIT',reason:'Crossover data stale; awaiting current update'};
     if(signal?.triggered&&now>=signal.expiresAt)return {state:'WAIT',reason:'Crossover expired; awaiting a new upward crossing'};

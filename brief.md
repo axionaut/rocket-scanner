@@ -1,10 +1,11 @@
-# Active Task: Deployed v1748 / Operational
+# Active Task: Deployed v1749 / Operational
 
-Rocket Scanner v1748 deployed at 2026-11-17 16:23 IST. System operational and in sync with origin/master.
+Rocket Scanner v1749 deployed at 2026-11-18 09:29 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1749:** Use rolling persisted AVWAP history and display candle values independently of first and last candle trade guards
 - **v1748:** Remove Export column and align compact default rank and numeric AVWAP table columns
 - **v1747:** Add clickable Default rank column to restore model ordering and remove redundant AVWAP signal candle column
 - **v1746:** Keep AVWAP candle diagnostics after stream disconnect and explain excluded, loading and missing history states

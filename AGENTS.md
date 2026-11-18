@@ -81,3 +81,9 @@
 - Both signal lines use completed 5-minute HLC/3-volume bars; previous session-candle VWAP <= AVWAP and latest VWAP > AVWAP. No overnight comparison, no forming candles, no first or last session candle. Signal expires at the next candle close.
 - Require T-2/T-1 history and current-session data; exchange calendar determines anchor and candle boundaries. Exchange VWAP/live quotes/depth remain execution inputs. Shared allocation and trailing exits apply; passing stocks have equal binary score 1.
 - CUM removed from the visible dropdown; saved strategy is not silently switched. Original mRMR and combined model are unchanged.
+
+## AVWAP rolling data visibility - owner, 18 November 2026
+
+- Candle loading and numeric display run independently of entry eligibility and first/last-candle restrictions. Show the first completed session candle immediately; compare adjacent completed values for crossing without an additional confirmation delay.
+- Keep completed T-2/T-1 history as a rolling baseline, refresh today separately, and preserve timestamped display values while refreshing and across helper restarts. Pre-open prior-session VWAP is explicitly dated and never treated as today's entry evidence.
+- Block trade authorization during the first and last session candle even when a preceding candle supplied a crossover. Cached display-only values cannot authorize trades.

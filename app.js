@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-17 16:23 IST'; // release build date (IST)
-const APP_VERSION=1748;
+const BUILD_TS='2026-11-18 09:29 IST'; // release build date (IST)
+const APP_VERSION=1749;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5601,8 +5601,8 @@ function avwapTableSignal(s){
 function avwapTableCell(s,key){
   const signal=avwapTableSignal(s),none='<span style="color:var(--t3)">-</span>';
   if(s?._us)return none;
-  if(key==='sessionVwap')return Number.isFinite(signal?.vwap)?fmtINR(signal.vwap):none;
-  if(key==='anchoredVwap')return Number.isFinite(signal?.avwap)?fmtINR(signal.avwap)+`<div style="font-size:11px;color:var(--t3)">Anchor ${escHtml(signal.anchor)}</div>`:none;
+  if(key==='sessionVwap')return Number.isFinite(signal?.vwap)?fmtINR(signal.vwap)+((signal.vwapSession&&signal.vwapSession!==getSessionDate())?`<div style="font-size:11px;color:var(--t3)">Session ${escHtml(signal.vwapSession)}</div>`:signal.refreshing?'<div style="font-size:11px;color:var(--t3)">Refreshing</div>':''):none;
+  if(key==='anchoredVwap')return Number.isFinite(signal?.avwap)?fmtINR(signal.avwap)+`<div style="font-size:11px;color:var(--t3)" title="${escHtml(signal.key?'Data through '+signal.key:'Prior completed candles')}">Anchor ${escHtml(signal.anchor)}${signal.refreshing?' / refreshing':''}</div>`:none;
   if(key==='vwapGap'){
     if(!(signal?.avwap>0&&Number.isFinite(signal.vwap)))return none;
     const gap=100*(signal.vwap/signal.avwap-1);
