@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-18 11:30 IST'; // release build date (IST)
-const APP_VERSION=1753;
+const BUILD_TS='2026-11-18 11:50 IST'; // release build date (IST)
+const APP_VERSION=1754;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5619,7 +5619,7 @@ function avwapTableCell(s,key){
   }
   const time=signal.key.slice(11,16),close=liveTapeTime(signal.end).slice(0,5);
   const fresh=Date.now()<signal.expiresAt,crossBlocked=signal.crossingAt&&!signal.triggered;
-  const relation=signal.triggered?(fresh?'Crossed up (4-bar VWAP \u2191)':'Crossover expired'):crossBlocked?(signal.vwapUptrend===false?`Crossed / ${signal.vwapRisingBars||1}/4 VWAP \u2191`:'Crossed / 1st-last candle'):signal.vwap>signal.avwap?'Above / no new cross':'Below or equal / no cross';
+  const relation=signal.triggered?(fresh?'Crossed up (4-bar \u2191)':'Crossover expired'):crossBlocked?(signal.vwapUptrend===false?`Crossed / ${signal.vwapRisingBars??0}/4 \u2191`:'Crossed / 1st-last candle'):signal.vwap>signal.avwap?'Above / no new cross':'Below or equal / no cross';
   return `<div style="font-size:12px;color:var(--${signal.triggered&&fresh?'green':'t3'})" title="${escHtml(signal.reason||relation)}">${escHtml(relation)}</div><div style="font-size:11px;color:var(--t3)">${time} - ${close} IST</div>`;
 }
 function crossCellHtml(s){

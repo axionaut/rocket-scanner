@@ -1023,7 +1023,7 @@ function bookedSession(session,holdingCosts,tradebook){
   }
   // ChartIQ connects indicator samples at candle START timestamps. Attribute the
   // drawn intersection to that interval; detection still waits for the later close.
-  const AVWAP_POLICY='avwap-t2-5m-v3-vwap-uptrend4';
+  const AVWAP_POLICY='avwap-t2-5m-v4-uptrend4';
   const AVWAP_UPTREND_CANDLES=4;
   function avwapChartCrossing(previous,current){
     const d0=Number(previous?.vwap)-Number(previous?.avwap),d1=Number(current?.vwap)-Number(current?.avwap);
@@ -1034,11 +1034,11 @@ function bookedSession(session,holdingCosts,tradebook){
   function avwapVwapUptrend(window){
     if(!Array.isArray(window)||window.length!==AVWAP_UPTREND_CANDLES)return false;
     for(let i=0;i<window.length;i++){
-      const v=Number(window[i]?.vwap),t=Date.parse(String(window[i]?.key).replace(' ','T')+'+05:30');
-      if(!Number.isFinite(v)||!Number.isFinite(t))return false;
+      const w=window[i],v=Number(w?.vwap),o=Number(w?.open),c=Number(w?.close),vol=Number(w?.volume),t=Date.parse(String(w?.key).replace(' ','T')+'+05:30');
+      if(!Number.isFinite(v)||!Number.isFinite(o)||!Number.isFinite(c)||!(vol>0)||!Number.isFinite(t)||c<o)return false;
       if(i>0){
-        const pv=Number(window[i-1]?.vwap),pt=Date.parse(String(window[i-1]?.key).replace(' ','T')+'+05:30');
-        if(!(v>pv&&t>pt))return false;
+        const pw=window[i-1],pv=Number(pw?.vwap),pc=Number(pw?.close),pt=Date.parse(String(pw?.key).replace(' ','T')+'+05:30');
+        if(!(t-pt===300000&&v>pv&&c>pc))return false;
       }
     }
     return true;
@@ -1051,24 +1051,32 @@ function bookedSession(session,holdingCosts,tradebook){
       const key=String(r[0]),day=key.slice(0,10),end=Date.parse(key.replace(' ','T')+'+05:30')+300000;
       if(day<anchor||day>session||end>now||seen.has(key))continue;
       seen.add(key);
-      const v=Number(r[5]),tp=(Number(r[2])+Number(r[3])+Number(r[4]))/3;
-      if(!(v>=0&&tp>0&&Number.isFinite(v)&&Number.isFinite(tp)))return {triggered:false,reason:'Invalid OHLCV history'};
+      const o=Number(r[1]),h=Number(r[2]),l=Number(r[3]),c=Number(r[4]),v=Number(r[5]),tp=(h+l+c)/3;
+      if(!(v>=0&&tp>0&&o>0&&c>0&&h>=l&&Number.isFinite(v)&&Number.isFinite(tp)&&Number.isFinite(o)&&Number.isFinite(c)))return {triggered:false,reason:'Invalid OHLCV history'};
       ap+=tp*v;av+=v;
       if(day<session){if(priorDay!==day){priorDay=day;priorPv=0;priorVol=0;}priorPv+=tp*v;priorVol+=v;priorBar={key,end};}
-      if(day===session){sp+=tp*v;sv+=v;if(sv>0&&av>0){previous=last;last={key,end,vwap:sp/sv,avwap:ap/av};sessionBars.push(last);}}
+      if(day===session){sp+=tp*v;sv+=v;if(sv>0&&av>0){previous=last;last={key,end,open:o,high:h,low:l,close:c,volume:v,vwap:sp/sv,avwap:ap/av};sessionBars.push(last);}}
     }
     if(!last)return {anchor,...priorBar,vwap:priorVol>0?priorPv/priorVol:null,avwap:av>0?ap/av:null,vwapSession:priorDay,displayOnly:true,triggered:false,reason:'Awaiting the first completed session candle; showing the last completed session'};
     if(!previous)return {...last,anchor,vwapSession:session,triggered:false,reason:'First session candle displayed; entry disabled on the first candle'};
     const minute=nseClock(now).minute,crossingAt=avwapChartCrossing(previous,last);
     const vwapWindow=sessionBars.slice(-AVWAP_UPTREND_CANDLES),vwapUptrend=avwapVwapUptrend(vwapWindow);
-    let vwapRisingBars=1;for(let i=sessionBars.length-1;i>0&&sessionBars[i].vwap>sessionBars[i-1].vwap;i--)vwapRisingBars++;
+    let vwapRisingBars=last.volume>0&&last.close>=last.open?1:0;
+    if(vwapRisingBars){
+      for(let i=sessionBars.length-1;i>0;i--){
+        const cur=sessionBars[i],prev=sessionBars[i-1];
+        const t1=Date.parse(String(cur.key).replace(' ','T')+'+05:30'),t0=Date.parse(String(prev.key).replace(' ','T')+'+05:30');
+        if(t1-t0===300000&&prev.volume>0&&prev.close>=prev.open&&cur.vwap>prev.vwap&&cur.close>prev.close)vwapRisingBars++;
+        else break;
+      }
+    }
     const openAt=Date.parse(session+'T00:00:00+05:30')+(bounds?.open||0)*60000;
     const closeAt=Date.parse(session+'T00:00:00+05:30')+(bounds?.close||0)*60000;
     const crossingAllowed=crossingAt!==null&&crossingAt>=openAt+300000&&crossingAt<closeAt-300000;
     const executionAllowed=!!bounds&&minute>=bounds.open+5&&minute<bounds.close-5;
     const triggered=crossingAllowed&&vwapUptrend&&executionAllowed&&now>=last.end&&now<last.end+300000;
     const crossingCandle=crossingAt===null?null:new Date(Math.floor((crossingAt-openAt)/300000)*300000+openAt+19800000).toISOString().slice(0,16).replace('T',' ');
-    const reason=crossingAt!==null&&!crossingAllowed?'Chart crossover belongs to the first or last session candle; entry disabled':crossingAllowed&&!vwapUptrend?(sessionBars.length<AVWAP_UPTREND_CANDLES?`5m VWAP crossed T-2 AVWAP before 4 completed session candles (${sessionBars.length}/4); entry requires 4-candle VWAP uptrend`:`5m VWAP crossed T-2 AVWAP without a 4-candle session VWAP uptrend (${vwapRisingBars}/4 rising candles); entry disabled`):triggered?'5m chart VWAP crossed above T-2 AVWAP on a 4-candle VWAP uptrend':!executionAllowed?'Entry disabled outside the permitted session candles':'Awaiting a fresh 5m VWAP crossover above T-2 AVWAP';
+    const reason=crossingAt!==null&&!crossingAllowed?'Chart crossover belongs to the first or last session candle; entry disabled':crossingAllowed&&!vwapUptrend?(sessionBars.length<AVWAP_UPTREND_CANDLES?`5m VWAP crossed T-2 AVWAP before 4 completed session candles (${sessionBars.length}/4); entry requires 4 contiguous rising candles and VWAP`:`5m VWAP crossed T-2 AVWAP without 4 contiguous rising candles and rising session VWAP (${vwapRisingBars}/4 rising candles); entry disabled`):triggered?'5m chart VWAP crossed above T-2 AVWAP on 4 contiguous rising candles and VWAP':!executionAllowed?'Entry disabled outside the permitted session candles':'Awaiting a fresh 5m VWAP crossover above T-2 AVWAP';
     return {...last,anchor,vwapSession:session,previous,vwapWindow,vwapUptrend,vwapRisingBars,sessionCandles:sessionBars.length,crossingAt,crossingCandle,detectedAt:last.end,triggered,expiresAt:last.end+300000,reason};
   }
   function avwapEntryState(source,symbol,now=Date.now()){
@@ -1079,7 +1087,7 @@ function bookedSession(session,holdingCosts,tradebook){
     const cross=avwapChartCrossing(signal?.previous,signal),openAt=Date.parse(source.session+'T00:00:00+05:30')+bounds.open*60000,closeAt=Date.parse(source.session+'T00:00:00+05:30')+bounds.close*60000;
     if(cross!==null&&(cross<openAt+300000||cross>=closeAt-300000))return {state:'WAIT',reason:'Chart crossover belongs to the first or last session candle; entry disabled'};
     const uptrend=avwapVwapUptrend(signal?.vwapWindow)&&signal?.vwapWindow?.[AVWAP_UPTREND_CANDLES-1]?.key===signal?.key&&signal?.vwapWindow?.[AVWAP_UPTREND_CANDLES-2]?.key===signal?.previous?.key;
-    if(cross!==null&&!uptrend)return {state:'WAIT',reason:signal?.reason?.includes('4-candle')?signal.reason:'5m VWAP crossover lacks a 4-candle session VWAP uptrend; entry disabled'};
+    if(cross!==null&&!uptrend)return {state:'WAIT',reason:signal?.reason?.includes('4 contiguous')||signal?.reason?.includes('4 completed')?signal.reason:'5m VWAP crossover lacks 4 contiguous rising candles and rising session VWAP; entry disabled'};
     const age=now-Date.parse(source.avwap.asOf);
     if(!(age>=0&&age<=30000))return {state:'WAIT',reason:'Crossover data stale; awaiting current update'};
     if(signal?.triggered&&now>=signal.expiresAt)return {state:'WAIT',reason:'Crossover expired; awaiting a new upward crossing'};
