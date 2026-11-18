@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-18 09:56 IST'; // release build date (IST)
-const APP_VERSION=1751;
+const BUILD_TS='2026-11-18 10:12 IST'; // release build date (IST)
+const APP_VERSION=1752;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8870,7 +8870,7 @@ function attachColDrag(tableEl,tableKey,onReorder){
     });
   });
 }
-function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowStyleFn=null, totalsRow=null, rowClickKey=null, secondarySortKey=null, secondaryDir=1){
+function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowStyleFn=null, totalsRow=null, rowClickKey=null, secondarySortKey=null, secondaryDir=1, defaultComparator=null){
   cols=applyColOrder(id,cols.slice());
   const thStyle=(align)=>`padding:6px 10px;text-align:${align};cursor:pointer;user-select:none;white-space:nowrap`;
   const tdStyle=(align,extra='')=>`padding:7px 10px;text-align:${align};white-space:nowrap${extra?';'+extra:''}`;
@@ -8886,6 +8886,7 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowSty
   };
   function render(){
     const sorted=[...rows].sort((a,b)=>{
+      if(defaultComparator&&sortKey===defaultSortKey)return defaultComparator(a,b)*(sortDir===defaultDir?1:-1);
       const av=a[sortKey],bv=b[sortKey];
       const primary=compareValues(av,bv,sortDir);
       if(primary!==0||sortKey!==defaultSortKey||!secondarySortKey) return primary;
@@ -9541,6 +9542,17 @@ function buildLatestSessionPanel(query=''){
 // One current-position view: the live portfolio merge plus the existing Radar context.
 // It reads the exit-policy helpers but never feeds anything back into scoring.
 // `query` filters only what is DISPLAYED; the panel always computes from the full position set.
+function compareOpenPositionVwapDistance(a,b){
+  const gap=r=>Number.isFinite(r.vwapGap)?r.vwapGap:null;
+  const ag=gap(a),bg=gap(b),group=g=>g===null?2:g<=0?0:1;
+  const ac=group(ag),bc=group(bg);
+  if(ac!==bc)return ac-bc;
+  if(ac===0&&ag!==bg)return bg-ag;
+  const price=r=>Number(r.ltp)>0?Number(r.ltp):Infinity;
+  const ap=price(a),bp=price(b);
+  if(ap!==bp)return ap-bp;
+  return String(a.sym).localeCompare(String(b.sym));
+}
 function buildOpenPositionsPanel(query=''){
   const useVwapGap=floorModel()==='AVWAP_CROSS';
   const scannerBySymbol=new Map(ALL.map(row=>[row.symbol,row]));
@@ -9723,9 +9735,9 @@ function buildOpenPositionsPanel(query=''){
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
   const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
   const openTotals={sym:'TOTAL',qty:shown.reduce((sum,row)=>sum+(row.qty||0),0),capital:shown.reduce((sum,row)=>sum+(row.capital||0),0),pnlRs:shown.reduce((sum,row)=>sum+(row.pnlRs||0),0)};
-  // Default order is numerical confidence: higher Radar score first, then the better (lower) rank.
-  // The composite only sorts; the cell continues to display the unmodified Score/# values.
-  const table=makeSortableTable('rank-open-positions',cols,shown,useVwapGap?'vwapGap':'score',-1,null,openTotals,'sym',useVwapGap?'sym':'rank',1);
+  // AVWAP positions use the ranking table distance groups and lower-price tie-break.
+  // Scored models retain score/rank ordering.
+  const table=makeSortableTable('rank-open-positions',cols,shown,useVwapGap?'vwapGap':'score',-1,null,openTotals,'sym',useVwapGap?'sym':'rank',1,useVwapGap?compareOpenPositionVwapDistance:null);
   const radarNote=ALL.length
     ?'Radar context is built from the live Kite tape. Click a symbol for its scoring breakdown.'
     :'Start the helper and log in to Kite to add Radar score, rank, setup, day change.';

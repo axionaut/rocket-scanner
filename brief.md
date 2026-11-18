@@ -1,10 +1,11 @@
-# Active Task: Deployed v1751 / Operational
+# Active Task: Deployed v1752 / Operational
 
-Rocket Scanner v1751 deployed at 2026-11-18 09:56 IST. System operational and in sync with origin/master.
+Rocket Scanner v1752 deployed at 2026-11-18 10:12 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1752:** Sort AVWAP open positions by ranking-table VWAP distance groups and lower-price ties
 - **v1751:** Show sortable VWAP Gap instead of empty Model Score in AVWAP open positions
 - **v1750:** Attribute AVWAP crossings to chart line intersection time and block first-candle TTML case
 - **v1749:** Use rolling persisted AVWAP history and display candle values independently of first and last candle trade guards
