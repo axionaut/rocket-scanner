@@ -92,3 +92,9 @@
 
 - Attribute upward crossings to the linear intersection between the previous/current indicator points plotted at their 5-minute candle start times. Exclude intersections inside the first/last session candle, independently of execution-time guards.
 - Detection still uses completed candles only. Never backdate execution or use the later point before its candle completes. Broker authorization recomputes the intersection and retains both values, anchor, crossing time and detection time. Reject prior AVWAP policy snapshots.
+
+## AVWAP 4-candle session VWAP uptrend - owner, 18 November 2026
+
+- AVWAP_CROSS upward crossovers additionally require a 4-candle current-session VWAP uptrend (`V[t-3] < V[t-2] < V[t-1] < V[t]`, 3 consecutive rising steps across completed 5-minute session candles).
+- Crossings before 4 completed session candles or without 3 consecutive rising session VWAP steps remain inspectable in the table but cannot trigger GO. Broker authorization recomputes the 4-candle VWAP uptrend from `vwapWindow` under policy `avwap-t2-5m-v3-vwap-uptrend4` and rejects prior AVWAP policy snapshots.
+
