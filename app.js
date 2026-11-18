@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-18 09:40 IST'; // release build date (IST)
-const APP_VERSION=1750;
+const BUILD_TS='2026-11-18 09:56 IST'; // release build date (IST)
+const APP_VERSION=1751;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5598,6 +5598,10 @@ function avwapTableSignal(s){
   const src=btstRanking()?.src;
   return src?.activeModel==='AVWAP_CROSS'?src.avwap?.signals?.[normSym(s.symbol)]:null;
 }
+function avwapGapOf(symbol){
+  const s=avwapTableSignal({symbol});
+  return Number.isFinite(s?.vwap)&&s?.avwap>0?100*(s.vwap/s.avwap-1):null;
+}
 function avwapTableCell(s,key){
   const signal=avwapTableSignal(s),none='<span style="color:var(--t3)">-</span>';
   if(s?._us)return none;
@@ -9538,6 +9542,7 @@ function buildLatestSessionPanel(query=''){
 // It reads the exit-policy helpers but never feeds anything back into scoring.
 // `query` filters only what is DISPLAYED; the panel always computes from the full position set.
 function buildOpenPositionsPanel(query=''){
+  const useVwapGap=floorModel()==='AVWAP_CROSS';
   const scannerBySymbol=new Map(ALL.map(row=>[row.symbol,row]));
   const rows=[];
 
@@ -9572,6 +9577,7 @@ function buildOpenPositionsPanel(query=''){
       flow:Number.isFinite(tapePolicy.flowPct)?+tapePolicy.flowPct.toFixed(2):null,
       baseQty,
       score:radarScore,rank:radarRank,
+      vwapGap:useVwapGap?avwapGapOf(pos.symbol):null,
       setup:scannerRow?.setup||'',
       dayPct:Number.isFinite(tapePolicy.price)&&tapePolicy.open>0
         ?100*(tapePolicy.price/tapePolicy.open-1):null,risk:scannerRow?.risk||'',
@@ -9702,9 +9708,12 @@ function buildOpenPositionsPanel(query=''){
         /* c8 ignore stop */
       },
       clrFn:()=>'var(--green)'},
-    {key:'score',label:'Model Score',align:'right',bold:true,
-      fmt:(v,row)=>modelScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
-      clrFn:()=>'var(--t1)'},
+    useVwapGap
+      ?{key:'vwapGap',label:'VWAP Gap',align:'right',bold:true,
+        fmt:(v,row)=>avwapTableCell({symbol:row.sym},'vwapGap'),clrFn:()=>'var(--t1)'}
+      :{key:'score',label:'Model Score',align:'right',bold:true,
+        fmt:(v,row)=>modelScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'\u2014'}</span>`,
+        clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
 
   ];
@@ -9716,7 +9725,7 @@ function buildOpenPositionsPanel(query=''){
   const openTotals={sym:'TOTAL',qty:shown.reduce((sum,row)=>sum+(row.qty||0),0),capital:shown.reduce((sum,row)=>sum+(row.capital||0),0),pnlRs:shown.reduce((sum,row)=>sum+(row.pnlRs||0),0)};
   // Default order is numerical confidence: higher Radar score first, then the better (lower) rank.
   // The composite only sorts; the cell continues to display the unmodified Score/# values.
-  const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,openTotals,'sym','rank',1);
+  const table=makeSortableTable('rank-open-positions',cols,shown,useVwapGap?'vwapGap':'score',-1,null,openTotals,'sym',useVwapGap?'sym':'rank',1);
   const radarNote=ALL.length
     ?'Radar context is built from the live Kite tape. Click a symbol for its scoring breakdown.'
     :'Start the helper and log in to Kite to add Radar score, rank, setup, day change.';
