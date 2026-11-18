@@ -61,9 +61,10 @@
 
 - Min/Max allocation rupees include buy charges. Min is the minimum cash budget to allocate, with whole shares rounded down inside it. Max caps existing holding value plus new shares and buy charges. Normal allocation uses available cash without an extra fixed rupee reserve. The page, broker authorisation and replay apply the same budget semantics.
 
-## Automatic target addition - owner, 17 November 2026
+## Automatic target addition - owner, 17 November 2026 (editable override - 18 November 2026)
 
-- Target + % automatically follows the MLoT history total weighted median, using the same covered-stock-weighted harmonic calculation and two-decimal rounding as the displayed total. The field is read-only. Retain the last available target while history loads.
+- Target + % defaults automatically to the MLoT history total weighted median, using the same covered-stock-weighted harmonic calculation and two-decimal rounding as the displayed total.
+- The user may manually type any value from 0 to 100% into `Target + %` (`targetExtraManual: true`) to override the automatic MLoT value, or clear the field to revert back to automatic MLoT tracking. Retain the last available auto value while history loads.
 
 ## MRMR entry guards - owner, 17 November 2026
 
@@ -93,8 +94,8 @@
 - Attribute upward crossings to the linear intersection between the previous/current indicator points plotted at their 5-minute candle start times. Exclude intersections inside the first/last session candle, independently of execution-time guards.
 - Detection still uses completed candles only. Never backdate execution or use the later point before its candle completes. Broker authorization recomputes the intersection and retains both values, anchor, crossing time and detection time. Reject prior AVWAP policy snapshots.
 
-## AVWAP 4-candle uptrend - owner, 18 November 2026
+## AVWAP 4-candle uptrend & jump band - owner, 18 November 2026
 
-- AVWAP_CROSS upward crossovers additionally require 4 contiguous completed 5-minute current-session candles (`t - prev_t == 5 min`, `volume > 0`) with non-red closes (`close >= open`), strictly rising candle closes (`C[t-3] < C[t-2] < C[t-1] < C[t]`), and strictly rising session VWAP (`V[t-3] < V[t-2] < V[t-1] < V[t]`).
-- Crossings before 4 completed session candles or failing the contiguous rising candle/VWAP check remain inspectable in the table but cannot trigger GO. Broker authorization recomputes the 4-candle uptrend from `vwapWindow` under policy `avwap-t2-5m-v4-uptrend4` and rejects prior AVWAP policy snapshots.
+- AVWAP_CROSS upward crossovers additionally require 4 contiguous completed 5-minute current-session candles (`t - prev_t == 5 min`, `volume > 0`) with non-red closes (`close >= open`), strictly rising candle closes (`C[t-3] < C[t-2] < C[t-1] < C[t]`), strictly rising session VWAP (`V[t-3] < V[t-2] < V[t-1] < V[t]`), and a 1-bar Session VWAP jump `100 * (V[t] / V[t-1] - 1)` within the `0.30%–0.50%` sweet spot (`AVWAP_JUMP_BAND`).
+- Crossings before 4 completed session candles, failing the contiguous rising candle/VWAP check, or outside the `0.30%–0.50%` jump band remain inspectable in the table but cannot trigger GO. Broker authorization recomputes both checks from `vwapWindow` and `previous`/`current` under policy `avwap-t2-5m-v5-jump-band` and rejects prior AVWAP policy snapshots.
 

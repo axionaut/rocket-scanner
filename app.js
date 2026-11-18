@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-18 11:50 IST'; // release build date (IST)
-const APP_VERSION=1754;
+const BUILD_TS='2026-11-18 12:28 IST'; // release build date (IST)
+const APP_VERSION=1755;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3818,7 +3818,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
-  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: completed 5m VWAP crosses above HLC/3 AVWAP anchored at T-2 session open on a 4-candle session VWAP uptrend. Crossing candle follows the chart line intersection; first and last candles excluded. Equal allocation across passing stocks.';
+  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: completed 5m VWAP crosses above HLC/3 AVWAP anchored at T-2 session open on 4 contiguous rising candles with a 0.30%-0.50% VWAP jump. First and last candles excluded. Equal allocation across passing stocks.';
   if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
@@ -5618,8 +5618,8 @@ function avwapTableCell(s,key){
     return `<span style="font-size:12px;color:var(--t3)" title="${escHtml(reason)}">${label}</span><div style="font-size:11px;color:var(--t3);max-width:230px">${escHtml(reason)}</div>`;
   }
   const time=signal.key.slice(11,16),close=liveTapeTime(signal.end).slice(0,5);
-  const fresh=Date.now()<signal.expiresAt,crossBlocked=signal.crossingAt&&!signal.triggered;
-  const relation=signal.triggered?(fresh?'Crossed up (4-bar \u2191)':'Crossover expired'):crossBlocked?(signal.vwapUptrend===false?`Crossed / ${signal.vwapRisingBars??0}/4 \u2191`:'Crossed / 1st-last candle'):signal.vwap>signal.avwap?'Above / no new cross':'Below or equal / no cross';
+  const fresh=Date.now()<signal.expiresAt,crossBlocked=signal.crossingAt&&!signal.triggered,jumpStr=Number.isFinite(signal.vwapJumpPct)?`${signal.vwapJumpPct>=0?'+':''}${signal.vwapJumpPct.toFixed(2)}%`:'';
+  const relation=signal.triggered?(fresh?`Crossed up (${jumpStr} \u2191)`:'Crossover expired'):crossBlocked?(signal.vwapUptrend===false?`Crossed / ${signal.vwapRisingBars??0}/4 \u2191`:signal.jumpInBand===false?`Crossed / ${jumpStr||'out of'} band`:'Crossed / 1st-last candle'):signal.vwap>signal.avwap?'Above / no new cross':'Below or equal / no cross';
   return `<div style="font-size:12px;color:var(--${signal.triggered&&fresh?'green':'t3'})" title="${escHtml(signal.reason||relation)}">${escHtml(relation)}</div><div style="font-size:11px;color:var(--t3)">${time} - ${close} IST</div>`;
 }
 function crossCellHtml(s){
@@ -8141,27 +8141,47 @@ function applyExecutionControls(controls){
   if(!controls||!Number.isInteger(controls.minPositionRs)||!Number.isInteger(controls.maxPositionRs)||!Number.isFinite(controls.targetExtraPct))return;
   const changed=JSON.stringify(executionControls)!==JSON.stringify(controls);
   executionControls=controls;
+  const lbl=document.getElementById('fTargetExtraLabel');
+  if(lbl)lbl.textContent=controls.targetExtraSource==='manual'?'Target + % (manual)':'Target + % (auto)';
   for(const [key,id] of [['targetExtraPct','fTargetExtra'],['minPositionRs','fMinPosition'],['maxPositionRs','fMaxPosition']]){
     const el=document.getElementById(id);
-    if(el&&key==='targetExtraPct'&&controls.targetExtraSource==='mlot-weighted-median'){
-      el.readOnly=true;el.value=Number(controls[key]).toFixed(2);executionControlDirty.delete(key);
-    }else if(el&&!executionControlDirty.has(key)&&document.activeElement!==el)el.value=controls[key];
+    if(!el)continue;
+    if(key==='targetExtraPct'){
+      el.readOnly=false;
+      if(Number.isFinite(controls.autoTargetExtraPct))el.placeholder=Number(controls.autoTargetExtraPct).toFixed(2);
+      if(!executionControlDirty.has(key)&&document.activeElement!==el){
+        el.value=controls.targetExtraSource==='mlot-weighted-median'?Number(controls[key]).toFixed(2):controls[key];
+      }
+    }else if(!executionControlDirty.has(key)&&document.activeElement!==el)el.value=controls[key];
   }
   if(changed){_dualPlanMemo=null;_usPlanMemo=null;if(typeof renderStats==='function')renderStats();}
 }
 // 16 Nov 2026 (owner): Min/Max position (rupees) replace "Stocks per allocation" for normal allocation buys.
 async function saveExecutionControl(key,el){
-  const raw=el.value.trim(),value=Number(raw),isPos=key==='minPositionRs'||key==='maxPositionRs';
+  const raw=el.value.trim(),isPos=key==='minPositionRs'||key==='maxPositionRs';
+  if(key==='targetExtraPct'&&raw===''){
+    el.disabled=true;
+    try{
+      const result=await readHelperResponse('/api/execution-controls',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({targetExtraPct:null,targetExtraManual:false}),timeout:8000});
+      if(!result?.ok)throw Error(result?.why||'Could not reset target addition');
+      executionControlDirty.delete(key);applyExecutionControls(result.controls);
+      if(typeof applyFilters==='function')applyFilters({preservePage:true});
+      showToast('Target addition: auto (+'+Number(result.controls.targetExtraPct).toFixed(2)+'%)');
+    }catch(e){showToast('Not saved: '+e.message,6000,true);}finally{el.disabled=false;}
+    return;
+  }
+  const value=Number(raw);
   const other=key==='minPositionRs'?executionControls?.maxPositionRs:key==='maxPositionRs'?executionControls?.minPositionRs:null;
   const valid=raw!==''&&Number.isFinite(value)&&(isPos?Number.isInteger(value)&&value>=(key==='maxPositionRs'?1000:0)&&value<=1e8&&(other==null||(key==='minPositionRs'?value<=other:value>=other)):value>=0&&value<=100);
-  if(!valid){showToast(isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100%.',5000,true);return;}
+  if(!valid){showToast(isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100% (or clear for auto).',5000,true);return;}
   el.disabled=true;
   try{
-    const result=await readHelperResponse('/api/execution-controls',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({[key]:value}),timeout:8000});
+    const payload=key==='targetExtraPct'?{targetExtraPct:value,targetExtraManual:true}:{[key]:value};
+    const result=await readHelperResponse('/api/execution-controls',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload),timeout:8000});
     if(!result?.ok)throw Error(result?.why||'Could not save execution control');
     executionControlDirty.delete(key);applyExecutionControls(result.controls);
     if(typeof applyFilters==='function')applyFilters({preservePage:true});
-    showToast(key==='minPositionRs'?'Min position: ₹'+value.toLocaleString('en-IN'):key==='maxPositionRs'?'Max position: ₹'+value.toLocaleString('en-IN'):'Target addition: +'+value+' percentage points');
+    showToast(key==='minPositionRs'?'Min position: ₹'+value.toLocaleString('en-IN'):key==='maxPositionRs'?'Max position: ₹'+value.toLocaleString('en-IN'):'Target addition (manual): +'+value+' percentage points');
   }catch(e){showToast('Not saved: '+e.message,6000,true);}finally{el.disabled=false;}
 }
 let lossFundingDirty=false;
