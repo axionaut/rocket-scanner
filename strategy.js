@@ -1021,6 +1021,15 @@ function bookedSession(session,holdingCosts,tradebook){
       return `Heavy selling volume: ${Math.round(g.sellVolShare*100)}% of last ${MRMR_GUARD.window} min volume on down bars at ${Number(g.volRatio).toFixed(1)}x normal while falling`;
     return null;
   }
+  // ChartIQ connects indicator samples at candle START timestamps. Attribute the
+  // drawn intersection to that interval; detection still waits for the later close.
+  const AVWAP_POLICY='avwap-t2-5m-v2-chart-cross';
+  function avwapChartCrossing(previous,current){
+    const d0=Number(previous?.vwap)-Number(previous?.avwap),d1=Number(current?.vwap)-Number(current?.avwap);
+    const t0=Date.parse(String(previous?.key).replace(' ','T')+'+05:30'),t1=Date.parse(String(current?.key).replace(' ','T')+'+05:30');
+    if(!Number.isFinite(d0)||!Number.isFinite(d1)||!(d0<=0&&d1>0&&t1>t0))return null;
+    return t0+(-d0/(d1-d0))*(t1-t0);
+  }
   // Binary crossover, observed only at completed five-minute closes. No overnight comparison.
   function avwapCrossSignal(bars, session, anchor, now=Date.now(), bounds=null) {
     let ap=0,av=0,sp=0,sv=0,previous=null,last=null,priorDay=null,priorPv=0,priorVol=0,priorBar=null;
@@ -1037,23 +1046,30 @@ function bookedSession(session,holdingCosts,tradebook){
     }
     if(!last)return {anchor,...priorBar,vwap:priorVol>0?priorPv/priorVol:null,avwap:av>0?ap/av:null,vwapSession:priorDay,displayOnly:true,triggered:false,reason:'Awaiting the first completed session candle; showing the last completed session'};
     if(!previous)return {...last,anchor,vwapSession:session,triggered:false,reason:'First session candle displayed; entry disabled on the first candle'};
-    const startMinute=Number(last.key.slice(11,13))*60+Number(last.key.slice(14,16));
-    const minute=nseClock(now).minute;
-    const allowed=!!bounds&&startMinute>bounds.open&&startMinute+5<bounds.close&&minute>=bounds.open+5&&minute<bounds.close-5;
-    const triggered=allowed&&now>=last.end&&now<last.end+300000&&previous.vwap<=previous.avwap&&last.vwap>last.avwap;
-    return {...last,anchor,vwapSession:session,previous,triggered,expiresAt:last.end+300000,reason:triggered?'5m session VWAP crossed above T-2 AVWAP':'Awaiting a fresh 5m VWAP crossover above T-2 AVWAP'};
+    const minute=nseClock(now).minute,crossingAt=avwapChartCrossing(previous,last);
+    const openAt=Date.parse(session+'T00:00:00+05:30')+(bounds?.open||0)*60000;
+    const closeAt=Date.parse(session+'T00:00:00+05:30')+(bounds?.close||0)*60000;
+    const crossingAllowed=crossingAt!==null&&crossingAt>=openAt+300000&&crossingAt<closeAt-300000;
+    const executionAllowed=!!bounds&&minute>=bounds.open+5&&minute<bounds.close-5;
+    const triggered=crossingAllowed&&executionAllowed&&now>=last.end&&now<last.end+300000;
+    const crossingCandle=crossingAt===null?null:new Date(Math.floor((crossingAt-openAt)/300000)*300000+openAt+19800000).toISOString().slice(0,16).replace('T',' ');
+    const reason=crossingAt!==null&&!crossingAllowed?'Chart crossover belongs to the first or last session candle; entry disabled':triggered?'5m chart VWAP crossed above T-2 AVWAP':!executionAllowed?'Entry disabled outside the permitted session candles':'Awaiting a fresh 5m VWAP crossover above T-2 AVWAP';
+    return {...last,anchor,vwapSession:session,previous,crossingAt,crossingCandle,detectedAt:last.end,triggered,expiresAt:last.end+300000,reason};
   }
   function avwapEntryState(source,symbol,now=Date.now()){
     const signal=source?.avwap?.signals?.[symbol];
-    if(source?.activeModel!=='AVWAP_CROSS'||source?.avwap?.version!=='avwap-t2-5m-v1'||source.session!==nseClock(now).day)return {state:'WAIT',reason:'Awaiting current AVWAP crossover data'};
+    if(source?.activeModel!=='AVWAP_CROSS'||source?.avwap?.version!==AVWAP_POLICY||source.session!==nseClock(now).day)return {state:'WAIT',reason:'Awaiting current AVWAP crossover data'};
     const bounds=nseSession(source.session,null,symbol),minute=nseClock(now).minute;
     if(!bounds||minute<bounds.open+5||minute>=bounds.close-5)return {state:'WAIT',reason:'Entry disabled outside the permitted session candles'};
+    const cross=avwapChartCrossing(signal?.previous,signal),openAt=Date.parse(source.session+'T00:00:00+05:30')+bounds.open*60000,closeAt=Date.parse(source.session+'T00:00:00+05:30')+bounds.close*60000;
+    if(cross!==null&&(cross<openAt+300000||cross>=closeAt-300000))return {state:'WAIT',reason:'Chart crossover belongs to the first or last session candle; entry disabled'};
     const age=now-Date.parse(source.avwap.asOf);
     if(!(age>=0&&age<=30000))return {state:'WAIT',reason:'Crossover data stale; awaiting current update'};
     if(signal?.triggered&&now>=signal.expiresAt)return {state:'WAIT',reason:'Crossover expired; awaiting a new upward crossing'};
     if(!signal?.triggered||now<signal.end)return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Awaiting a fresh 5m VWAP crossover'};
     if(!source.crossings?.includes(symbol))return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Hard filters or execution readiness pending'};
-    return {state:'GO',score:1,reason:signal.reason};
+    if(cross===null||signal.refreshing||signal.displayOnly)return {state:'WAIT',reason:'Awaiting verified current chart crossover evidence'};
+    return {state:'GO',score:1,reason:signal.reason,evidence:{policy:AVWAP_POLICY,anchor:signal.anchor,previous:signal.previous,current:{key:signal.key,end:signal.end,vwap:signal.vwap,avwap:signal.avwap},crossingAt:cross,crossingCandle:signal.crossingCandle,detectedAt:signal.end,sourceAsOf:source.avwap.asOf}};
   }
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
   function entryGateApplies(){
@@ -1068,7 +1084,7 @@ function bookedSession(session,holdingCosts,tradebook){
 
   return {
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
-    applySelectedModel,avwapCrossSignal,avwapEntryState,
+    applySelectedModel,AVWAP_POLICY,avwapChartCrossing,avwapCrossSignal,avwapEntryState,
     entryScoreCapped,
     MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,

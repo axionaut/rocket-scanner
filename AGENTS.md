@@ -87,3 +87,8 @@
 - Candle loading and numeric display run independently of entry eligibility and first/last-candle restrictions. Show the first completed session candle immediately; compare adjacent completed values for crossing without an additional confirmation delay.
 - Keep completed T-2/T-1 history as a rolling baseline, refresh today separately, and preserve timestamped display values while refreshing and across helper restarts. Pre-open prior-session VWAP is explicitly dated and never treated as today's entry evidence.
 - Block trade authorization during the first and last session candle even when a preceding candle supplied a crossover. Cached display-only values cannot authorize trades.
+
+## Chart-aligned AVWAP crossing attribution - owner, 18 November 2026
+
+- Attribute upward crossings to the linear intersection between the previous/current indicator points plotted at their 5-minute candle start times. Exclude intersections inside the first/last session candle, independently of execution-time guards.
+- Detection still uses completed candles only. Never backdate execution or use the later point before its candle completes. Broker authorization recomputes the intersection and retains both values, anchor, crossing time and detection time. Reject prior AVWAP policy snapshots.

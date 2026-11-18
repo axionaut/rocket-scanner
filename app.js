@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-18 09:29 IST'; // release build date (IST)
-const APP_VERSION=1749;
+const BUILD_TS='2026-11-18 09:40 IST'; // release build date (IST)
+const APP_VERSION=1750;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3818,7 +3818,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
-  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: completed 5m session VWAP crosses above HLC/3 AVWAP anchored at T-2 session open. First and last candles excluded. Equal allocation across passing stocks.';
+  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: completed 5m VWAP crosses above HLC/3 AVWAP anchored at T-2 session open. Crossing candle follows the chart line intersection; first and last candles excluded. Equal allocation across passing stocks.';
   if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
