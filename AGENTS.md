@@ -109,3 +109,5 @@
 - At minimum distance, keep trailing new highs; reaching minimum does not itself sell. Price crossing triggers the existing single-leg GTT lifecycle. Partial profit-funded trims retain their separate reservations and quantities.
 - Missing ATR blocks new automated buy authorization; preserve existing protection while history refreshes. Shared replay uses causal candle evidence and labels missing ATR coverage explicitly. Parameters describe implementation, not validated profitability.
 - Target addition remains saved for opportunity-swap expectancy; it no longer delays initial ATR protection. UI must distinguish broker-confirmed stops from pending protection and expose allocation cap versus cash numerically.
+
+- Initial protective GTTs take priority over routine ratchets. Queue-full/expired-before-send errors are explicitly `notSubmitted` and retry with fresh quotes; genuine ambiguous broker writes retain reconciliation. ATR history uses a dedicated loader so whole-universe scoring cannot starve protection.

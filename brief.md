@@ -1,10 +1,11 @@
-# Active Task: Deployed v1758 / Operational
+# Active Task: Deployed v1759 / Operational
 
-Rocket Scanner v1758 deployed at 2026-11-19 10:03 IST. System operational and in sync with origin/master.
+Rocket Scanner v1759 deployed at 2026-11-19 10:08 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1759:** Prioritize initial ATR protection and retry unsent stop requests without ambiguous-write delay
 - **v1758:** Replace profit-only exits with initial 5m ATR protection and candle-confirmed trailing; explain allocation caps
 - **v1757:** Eliminate AVWAP candle refresh lag and coalesce stream bar flushes to minute boundaries
 - **v1756:** Flush completed stream candles immediately for all models and prioritize coiled AVWAP WAIT rows
