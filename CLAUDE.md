@@ -7,7 +7,7 @@ Owner workflow update (13 November 2026). Work directly unless the owner explici
 This document is the single source of truth for how Rocket Scanner works **today**: architecture, trading rules and the release workflow. Keep it current: when a release changes behaviour, edit the section it changes; do not append a changelog here.
 
 
-Current version: **v1760** (2026-11-19). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
+Current version: **v1761** (2026-11-19). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
 
 StratGen research controls read only the current form: fixed shared_rs exits, selected history and auto-refine. Removed target/horizon controls are never accessed; older saved controls retain their supported history and auto-refine values, and running-job display uses the shared-exit summary. SDL is verified through its actual UI start handler into a live research worker.
 
@@ -261,3 +261,5 @@ Owner override, 17 November 2026: profit-funded loss allowance uses today only. 
 
 
 19 Nov 2026: Owner-approved exit replacement: `dev/atr-exit.cjs` implements initial completed-5m Wilder ATR14 (1 ATR), monotonic trailing and completed-candle weakness tightening to the existing broker minimum. No profit-only arming, Markov/MLoT tightening or swing-bounce lift on live exit path. Existing confirmed stops stay locked. Shared replay calls the same module. Target addition is retained for swap expectancy only. See latest AGENTS.md section.
+
+19 Nov correction: universal booked-profit funding overrides ATR loss stops for ALL entries and holdings. ATR only proposes; below-breakeven full-position GTT writes are forbidden. Remove mistakenly introduced unrestricted ATR loss GTTs; preserve funded trims. See final AGENTS section.

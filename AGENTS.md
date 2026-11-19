@@ -111,3 +111,11 @@
 - Target addition remains saved for opportunity-swap expectancy; it no longer delays initial ATR protection. UI must distinguish broker-confirmed stops from pending protection and expose allocation cap versus cash numerically.
 
 - Initial protective GTTs take priority over routine ratchets. Queue-full/expired-before-send errors are explicitly `notSubmitted` and retry with fresh quotes; genuine ambiguous broker writes retain reconciliation. ATR history uses a dedicated loader so whole-universe scoring cannot starve protection.
+
+
+## Universal profit funding correction - owner, 19 November 2026
+
+- Every loss-bearing exit, without exception for new orders or carried holdings, requires the existing booked-profit funding and reservation controls. ATR is never authority to bypass them.
+- Remove all unrestricted full-position below-breakeven ATR GTTs introduced by the migration, including new buys. Preserve legitimate budgeted partial trims and confirmed profitable protection.
+- ATR may propose and track a stop locally; a full-position GTT can only be written when its trigger and execution limit cover charges/breakeven. Otherwise existing profit-funded trim authorization remains authoritative. Zero funding means no loss-bearing sell authorization.
+- Do not reset booked losses or rebuy positions as part of this correction. This supersedes earlier unrestricted ATR initial-stop and old/new distinctions.

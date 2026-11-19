@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-19 10:10 IST'; // release build date (IST)
-const APP_VERSION=1760;
+const BUILD_TS='2026-11-19 10:18 IST'; // release build date (IST)
+const APP_VERSION=1761;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5643,6 +5643,7 @@ function exitCellHtml(s){
     const detail=a?'Initial ATR ?'+a.initialAtr.toFixed(2)+'; current distance ?'+a.distance.toFixed(2):'Existing locked protection retained';
     return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="${detail}; stop only moves upward"><span style="color:var(--red)">SL ?${sl.toFixed(2)}</span> <span style="color:var(--t3)">(${mode})</span></div>`;
   }
+  if(p.lossFundingRequired&&!p.lossGttId)return '<span style="color:var(--t3)">Loss exit requires profit funding</span>';
   if(p.lossGttId)return '<span style="color:var(--amber)">Partial trim protection</span>';
   return '<span style="color:var(--red)" title="'+(p.protectionPending||'Awaiting broker confirmation')+'">SL pending ? '+(p.bracket?.atr?'broker confirmation':'5m ATR')+'</span>';
 }
