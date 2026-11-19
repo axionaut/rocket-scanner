@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-19 10:18 IST'; // release build date (IST)
-const APP_VERSION=1761;
+const BUILD_TS='2026-11-19 15:19 IST'; // release build date (IST)
+const APP_VERSION=1762;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3818,7 +3818,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
-  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: completed 5m VWAP crosses above HLC/3 AVWAP anchored at T-2 session open on 4 contiguous rising candles with a 0.30%-0.50% VWAP jump. First and last candles excluded. Equal allocation across passing stocks.';
+  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: 1st completed 5m close crossing above HLC/3 AVWAP anchored at T-2 session open on 4 contiguous rising candles, 0.20%-0.60% VWAP jump, >0.8% room to T-2/T-1 high, and candle CLV >= 0.75. First and last candles excluded.';
   if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
@@ -4890,7 +4890,7 @@ function syncSelectedModelFromHelper(){
     rememberModelChoice(model);
     RocketStrategy?.applySelectedModel(model);
     const brandTag=document.querySelector('.brand-tag');
-    if(brandTag)brandTag.textContent=model==='AVWAP_CROSS'?'5m VWAP crosses above T-2 AVWAP':model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Prior-Close Return Learning':'CUM - VWAP Trend & Breadth';
+    if(brandTag)brandTag.textContent=model==='AVWAP_CROSS'?'5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Prior-Close Return Learning':'CUM - VWAP Trend & Breadth';
     if(changedModel)initScoreFloorUI(true);
     refreshBtstModelView();
     _strategySyncSignature=model;
@@ -5619,7 +5619,8 @@ function avwapTableCell(s,key){
   }
   const time=signal.key.slice(11,16),close=liveTapeTime(signal.end).slice(0,5);
   const fresh=Date.now()<signal.expiresAt,crossBlocked=signal.crossingAt&&!signal.triggered,jumpStr=Number.isFinite(signal.vwapJumpPct)?`${signal.vwapJumpPct>=0?'+':''}${signal.vwapJumpPct.toFixed(2)}%`:'';
-  const relation=signal.triggered?(fresh?`Crossed up (${jumpStr} \u2191)`:'Crossover expired'):crossBlocked?(signal.vwapUptrend===false?`Crossed / ${signal.vwapRisingBars??0}/4 \u2191`:signal.jumpInBand===false?`Crossed / ${jumpStr||'out of'} band`:'Crossed / 1st-last candle'):signal.vwap>signal.avwap?'Above / no new cross':`Below / ${signal.vwapRisingBars??0}/4 \u2191`;
+  const clvStr=Number.isFinite(signal.clv)?`CLV ${signal.clv.toFixed(2)}`:'',roomStr=Number.isFinite(signal.roomPct)?`Room ${signal.roomPct.toFixed(1)}%`:'';
+  const relation=signal.triggered?(fresh?`Crossed up (${jumpStr}${clvStr?', '+clvStr:''})`:'Crossover expired'):crossBlocked?(signal.vwapUptrend===false?`Crossed / ${signal.vwapRisingBars??0}/4 \u2191`:signal.jumpInBand===false?`Crossed / ${jumpStr||'out of'} band`:signal.isFirstCross===false?'Crossed / 2nd+ cross':signal.roomOk===false?`Crossed / ${roomStr||'low room'}`:signal.clvOk===false?`Crossed / ${clvStr||'weak bar'}`:'Crossed / 1st-last candle'):((Number.isFinite(signal.close)?signal.close:signal.vwap)>signal.avwap?'Above / no new cross':`Below / ${signal.vwapRisingBars??0}/4 \u2191`);
   return `<div style="font-size:12px;color:var(--${signal.triggered&&fresh?'green':'t3'})" title="${escHtml(signal.reason||relation)}">${escHtml(relation)}</div><div style="font-size:11px;color:var(--t3)">${time} - ${close} IST</div>`;
 }
 function crossCellHtml(s){
@@ -12222,7 +12223,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'Completed 5m VWAP / T-2 AVWAP upward crossover':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
+  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'1st 5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:'rs-trail-min5-v2'}}};
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
@@ -12232,7 +12233,7 @@ function dashboardMarketCards(){
     const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'Native strategy';
     add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'}${floorModel()==='CUM'?' · Binary Pass/Fail':''}` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,floorModel()==='AVWAP_CROSS'?'Hard filters + confirmed 5m upward crossover + 4-candle VWAP uptrend (first/last candles excluded)':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation');
+    add(2,'NSE',`${go} GO`,floorModel()==='AVWAP_CROSS'?'Hard filters + 1st 5m close > T-2 AVWAP + 4-candle uptrend + 0.20%-0.60% jump + Room>0.8% + CLV>=0.75':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
     if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','No minimum hold; no maximum');
@@ -14292,7 +14293,7 @@ function emptyBoardReason(){
     if(!selected?.topSymbols?.length)return 'No positive Ensemble candidates in the current market snapshot.';
     return 'No executable recommendations: the top-five positive shortlist is waiting for live VWAP, quote or account eligibility. Use Show ineligible to inspect the failed stage.';
   }
-  if(floorModel()==='AVWAP_CROSS')return 'Waiting for a confirmed 5m VWAP crossover above T-2 AVWAP on a 4-candle session VWAP uptrend after hard filters. First and last candles excluded. Use Show ineligible for reasons.';
+  if(floorModel()==='AVWAP_CROSS')return 'Waiting for 1st 5m close crossing above T-2 AVWAP on 4 rising candles, 0.20%-0.60% VWAP jump, >0.8% room to T-2/T-1 high, and CLV >= 0.75 after hard filters. First and last candles excluded. Use Show ineligible for reasons.';
   if(floorModel()==='MRMR'){
     const source=BTST.data||BTST.rank,mrmr=source?.mrmr;
     if(!mrmr?.ok)return 'Awaiting Original mRMR prior-close return scores: '+escHtml(mrmr?.reason||'218-indicator worker is computing')+'.';

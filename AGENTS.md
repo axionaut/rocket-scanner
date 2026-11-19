@@ -99,6 +99,11 @@
 - AVWAP_CROSS upward crossovers additionally require 4 contiguous completed 5-minute current-session candles (`t - prev_t == 5 min`, `volume > 0`) with non-red closes (`close >= open`), strictly rising candle closes (`C[t-3] < C[t-2] < C[t-1] < C[t]`), strictly rising session VWAP (`V[t-3] < V[t-2] < V[t-1] < V[t]`), and a 1-bar Session VWAP jump `100 * (V[t] / V[t-1] - 1)` within the `0.30%–0.50%` sweet spot (`AVWAP_JUMP_BAND`).
 - Crossings before 4 completed session candles, failing the contiguous rising candle/VWAP check, or outside the `0.30%–0.50%` jump band remain inspectable in the table but cannot trigger GO. Broker authorization recomputes both checks from `vwapWindow` and `previous`/`current` under policy `avwap-t2-5m-v5-jump-band` and rejects prior AVWAP policy snapshots.
 
+## AVWAP close crossover, headroom & candle CLV - owner, 19 November 2026
+
+- Upgrades `AVWAP_CROSS` from `VWAP > T-2 AVWAP` to the **first** completed 5-minute **close** crossing above T-2 HLC/3 AVWAP in the current session (`prev.close <= prev.avwap` and `close > avwap`), retaining the 4 contiguous non-red rising-candle/rising-VWAP check (`AVWAP_UPTREND_CANDLES = 4`) and widening the 1-bar VWAP jump band to `0.20%–0.60%` (`AVWAP_JUMP_BAND`), plus requiring `> 0.8%` headroom to the prior 2-session high (`T-2`/`T-1`, `AVWAP_ROOM_MIN_PCT`) and strong candle finish `CLV >= 0.75` (`(close - low) / (high - low)`, `AVWAP_CLV_MIN`).
+- First/last session candle exclusions and single-candle expiry remain unchanged. Broker authorization (`avwapEntryState`) independently recomputes the price crossing, 4-candle uptrend, `0.20%–0.60%` VWAP jump, first-cross flag, headroom `> 0.8%`, and `CLV >= 0.75` under policy `avwap-t2-5m-v6-price-clv`, rejecting all prior AVWAP policy snapshots (`v5` and earlier).
+
 
 
 ## ATR initial protection and trailing replacement - owner, 19 November 2026
