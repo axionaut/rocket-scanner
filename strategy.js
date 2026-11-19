@@ -218,7 +218,7 @@
           ? `Remaining all-in position budget ${money(room)} cannot cover the ${money(floor)} minimum allocation`
           : spendable<floor
           ? `Waiting for cash: ${money(spendable)} available; minimum all-in allocation ${money(floor)}`
-          : `Liquidity or allocation cap cannot cover the ${money(floor)} all-in minimum`;
+          : `Market-impact/allocation cap ${money(ceiling)} is below minimum ${money(floor)}; available cash ${money(spendable)}`;
       }
       if(!reason&&selected.length>=maxStocks)reason='Stocks per allocation limit reached; higher scores funded first';
       if(!reason&&reserved+floor>spendable+1e-7)reason=limits.min>=economicFloor&&limits.min>0

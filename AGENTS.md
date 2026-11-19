@@ -99,3 +99,13 @@
 - AVWAP_CROSS upward crossovers additionally require 4 contiguous completed 5-minute current-session candles (`t - prev_t == 5 min`, `volume > 0`) with non-red closes (`close >= open`), strictly rising candle closes (`C[t-3] < C[t-2] < C[t-1] < C[t]`), strictly rising session VWAP (`V[t-3] < V[t-2] < V[t-1] < V[t]`), and a 1-bar Session VWAP jump `100 * (V[t] / V[t-1] - 1)` within the `0.30%–0.50%` sweet spot (`AVWAP_JUMP_BAND`).
 - Crossings before 4 completed session candles, failing the contiguous rising candle/VWAP check, or outside the `0.30%–0.50%` jump band remain inspectable in the table but cannot trigger GO. Broker authorization recomputes both checks from `vwapWindow` and `previous`/`current` under policy `avwap-t2-5m-v5-jump-band` and rejects prior AVWAP policy snapshots.
 
+
+
+## ATR initial protection and trailing replacement - owner, 19 November 2026
+
+- Supersedes the profit-only arming, MLoT/Markov extension tightening and swing-bounce exit rules above. Shared NSE exit policy is `rs-atr5m-ratchet-v1`.
+- Initial protection uses one Wilder ATR14 from completed 5-minute candles, respecting the existing broker distance/tick checks. No breakeven or Target + % arming delay. Existing unprotected inventory starts from its current quote; confirmed stops are never lowered.
+- Healthy new highs lift the stop with its existing rupee distance. Ordinary dips/rebounds do not squeeze it. Three contiguous completed candles with two strictly lower highs and closes confirm weakness; each new weak candle reduces distance by the larger of its high decline or ATR contraction, bounded at the broker minimum. Never apply the same candle twice.
+- At minimum distance, keep trailing new highs; reaching minimum does not itself sell. Price crossing triggers the existing single-leg GTT lifecycle. Partial profit-funded trims retain their separate reservations and quantities.
+- Missing ATR blocks new automated buy authorization; preserve existing protection while history refreshes. Shared replay uses causal candle evidence and labels missing ATR coverage explicitly. Parameters describe implementation, not validated profitability.
+- Target addition remains saved for opportunity-swap expectancy; it no longer delays initial ATR protection. UI must distinguish broker-confirmed stops from pending protection and expose allocation cap versus cash numerically.
