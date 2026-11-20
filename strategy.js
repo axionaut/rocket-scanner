@@ -191,8 +191,10 @@
     const capital=Number(account.capital)>0?Math.min(cash,Number(account.capital)):cash;
     const inclusive=Number.isInteger(account.minPositionRs)||Number.isInteger(account.maxPositionRs);
     const spendable=Math.max(0,capital-(inclusive?0:1)),alloc={},reasons={},selected=[];
-    const pool=[...candidates].sort((a,b)=>(b.score||0)-(a.score||0)||
-      ((a.triggerAt??Infinity)-(b.triggerAt??Infinity))||(b.rvol||0)-(a.rvol||0)||(b.barRs||0)-(a.barRs||0)||a.symbol.localeCompare(b.symbol));
+    const sortByDayPctAsc=account?.sortBy==='dayPctAsc';
+    const pool=[...candidates].sort((a,b)=>sortByDayPctAsc
+      ? ((Number.isFinite(Number(a.dayPct))?Number(a.dayPct):Infinity)-(Number.isFinite(Number(b.dayPct))?Number(b.dayPct):Infinity)||(b.score||0)-(a.score||0)||a.symbol.localeCompare(b.symbol))
+      : ((b.score||0)-(a.score||0)||((a.triggerAt??Infinity)-(b.triggerAt??Infinity))||(b.rvol||0)-(a.rvol||0)||(b.barRs||0)-(a.barRs||0)||a.symbol.localeCompare(b.symbol)));
     const fees=account.orderCharges||((qty,price)=>sumChargeParts(calcZerodhaChargesSplit(price,qty,false,false,false)));
     const quantity=(budget,r)=>{
       if(!account.orderCharges)return quantityWithinBudget(budget,r.price,r.unit??r.unitDebit);
@@ -240,7 +242,7 @@
       alloc[r.symbol]={qty,capital:cost,charges,debit,budget,minimum:inclusive?r.floor:r.minimum*r.price,score:r.score,weight:r.score/selected.reduce((n,x)=>n+x.score,0)};remaining-=debit;
     }
     // Largest remainders; no cash overrun or fractional shares.
-    const rounding=[...selected].sort((a,b)=>((alloc[b.symbol].budget/ b.unit)%1)-((alloc[a.symbol].budget/a.unit)%1)||b.score-a.score);
+    const rounding=[...selected].sort((a,b)=>((alloc[b.symbol].budget/ b.unit)%1)-((alloc[a.symbol].budget/a.unit)%1)||(sortByDayPctAsc?((Number.isFinite(Number(a.dayPct))?Number(a.dayPct):Infinity)-(Number.isFinite(Number(b.dayPct))?Number(b.dayPct):Infinity)):(b.score-a.score)));
     for(const r of rounding){const x=alloc[r.symbol],extra=account.orderCharges?r.price+fees(x.qty+1,r.price)-x.charges:r.unit;if(extra>remaining+1e-7||x.debit+extra>r.ceiling+1e-7)continue;x.qty++;x.capital=x.qty*r.price;x.charges=fees(x.qty,r.price);const debit=x.capital+x.charges;remaining-=debit-x.debit;x.debit=debit;}
     return {alloc,reasons,funded:selected.map(r=>r.symbol),remaining,minimum:breakevenTurnover(false,account.mlot),mode:'score-proportional'};
   }
@@ -1143,15 +1145,37 @@ function bookedSession(session,holdingCosts,tradebook){
     return false;
   }
 
+  const TV_SCREENER_POLICY = 'tv-screener-daypct-asc-v1';
+  const TV_SCREENER_EXIT_POLICY = 'rs-sl1pct-atr-ratchet-v1';
+  function tvScreenerEntryState(source,symbol,quote,now=Date.now()) {
+    const sym=String(symbol||'').toUpperCase();
+    if(source?.activeModel!=='TV_SCREENER'||source?.rules?.pickPolicy!==TV_SCREENER_POLICY||source?.session!==nseClock(now).day){
+      return {state:'WAIT',reason:'Awaiting current TradingView Screener evaluation'};
+    }
+    const at=Date.parse(source.tvScreener?.asOf||source.asOf||'');
+    if(source.ok!==true||source.tvScreener?.ok!==true||!Number.isFinite(at)||now<at||now-at>180000){
+      return {state:'WAIT',reason:'Awaiting fresh TradingView Screener scores'};
+    }
+    if(!nseContinuous(now,sym))return {state:'WAIT',reason:'Outside continuous trading session'};
+    const ready=memQuoteState(quote,now);if(ready.state!=='READY')return ready;
+    const pick=source.picks?.find(p=>p.symbol===sym);
+    if(!pick?.triggered||!source.crossings?.includes(sym)){
+      return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting all 12 Buy/Strong Buy ratings + liquidity & 15m VWAP filters'};
+    }
+    return {state:'GO',score:1,dayPct:pick.dayPct??null,exitPolicy:TV_SCREENER_EXIT_POLICY,reason:pick.why};
+  }
+
   function applySelectedModel(model) {
     const selected=String(model||'CUM').toUpperCase();
-    if(!['CUM','MARKOV_3PCT','ENS','PATH','MRMR','AVWAP_CROSS'].includes(selected))throw Error('Unknown selected model');
+    if(!['CUM','MARKOV_3PCT','ENS','PATH','MRMR','AVWAP_CROSS','TV_SCREENER'].includes(selected))throw Error('Unknown selected model');
+    if(selected==='TV_SCREENER'){CONFIG.TARGET_PCT=0;CONFIG.STOP_LOSS_PCT=1;CONFIG.MAX_HOLDING_DAYS=null;return;}
     CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;
   }
 
   return {
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
     applySelectedModel,AVWAP_POLICY,AVWAP_UPTREND_CANDLES,AVWAP_JUMP_BAND,AVWAP_ROOM_MIN_PCT,AVWAP_CLV_MIN,avwapChartCrossing,avwapVwapUptrend,avwapJumpPct,avwapJumpInBand,avwapBarClv,avwapRoomPct,avwapCrossSignal,avwapEntryState,
+    TV_SCREENER_POLICY,TV_SCREENER_EXIT_POLICY,tvScreenerEntryState,
     entryScoreCapped,
     MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,

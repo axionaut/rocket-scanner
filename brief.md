@@ -1,10 +1,11 @@
-# Active Task: Deployed v1762 / Operational
+# Active Task: Deployed v1763 / Operational
 
-Rocket Scanner v1762 deployed at 2026-11-19 15:19 IST. System operational and in sync with origin/master.
+Rocket Scanner v1763 deployed at 2026-11-20 14:10 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1763:** Add TV_SCREENER strategy with 1m/5m/15m/1D Buy ratings, NSE shareholders >5k, Day % ascending order, and fixed -1% SL + current ATR ratchet
 - **v1762:** Upgrade AVWAP_CROSS to first 5m close above T-2 AVWAP with 0.20-0.60% VWAP jump, >0.8% headroom and CLV >= 0.75
 - **v1761:** Enforce booked-profit funding for every loss exit and remove unrestricted ATR loss GTTs
 - **v1760:** Recover protection refresh state after restart and require ATR coverage before replay entries
