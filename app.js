@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-20 14:55 IST'; // release build date (IST)
-const APP_VERSION=1764;
+const BUILD_TS='2026-11-20 15:36 IST'; // release build date (IST)
+const APP_VERSION=1765;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3819,7 +3819,7 @@ function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
   if(floorModel()==='AVWAP_CROSS')return 'Binary entry: 1st completed 5m close crossing above HLC/3 AVWAP anchored at T-2 session open on 4 contiguous rising candles, 0.20%-0.60% VWAP jump, >0.8% room to T-2/T-1 high, and candle CLV >= 0.75. First and last candles excluded.';
-  if(floorModel()==='TV_SCREENER')return `MTF Ratings Screener: 1m/5m/15m/1D MA, Oscillator & Tech ratings all Buy/Strong Buy, Price 25-${getScreenerMaxPrice()}, Price*Vol > 5M, RelVol > 1.1, Shareholders > 5k, Low 15m > VWAP. Sorted Day % ascending; fixed -1% SL until current ATR ratchet arms.`;
+  if(floorModel()==='TV_SCREENER')return `MTF Ratings Screener: 1m/5m/15m/1D MA, Oscillator & Tech ratings all Buy/Strong Buy, Price 25-${getScreenerMaxPrice()}, Price*Vol > 5M, RelVol > 1.1, Shareholders > 5k, Low 30m >= VWAP. Sorted Day % ascending; fixed -1% SL until current ATR ratchet arms.`;
   if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
@@ -4622,20 +4622,32 @@ async function loadBtstPicks(){
 let SCORE_HIGHS=null;
 let ENTRY_TRIGGERS=null;
 // One push connection replaces entry/score/status polling while healthy. Execution timers stay independent.
-const PAGE_LIVE={source:null,lastAt:0,boot:null,seq:-1,rankRevision:null,rows:new Map(),crossRecords:{},paint:null,reads:new Set(),reading:false,readTimer:null,
+const PAGE_LIVE={source:null,lastAt:0,boot:null,seq:-1,rankRevision:null,rows:new Map(),crossRecords:{},tvDetails:new Map(),paint:null,reads:new Set(),reading:false,readTimer:null,
   metrics:{messages:0,characters:0,lastDeliveryMs:0,maxDeliveryMs:0,lastCheckToDomMs:null,paintMs:0}};
 function pageLiveHealthy(){return !!PAGE_LIVE.source&&PAGE_LIVE.source.readyState===1&&Date.now()-PAGE_LIVE.lastAt<25000;}
 function pageLiveStatus(){return {...PAGE_LIVE.metrics,healthy:pageLiveHealthy(),ageMs:Date.now()-PAGE_LIVE.lastAt,rankRevision:PAGE_LIVE.rankRevision,rows:PAGE_LIVE.rows.size};}
 function applyPageLiveRank(p){
   if(!p)return false;
   if(!p.full&&PAGE_LIVE.rankRevision!==p.base)throw Error('Live score baseline changed; snapshot required');
-  if(!p.full&&!p.rows.length&&!p.removed.length&&!Object.keys(p.meta).length&&!Object.keys(p.crossRecords).length&&!p.crossRemoved.length)return false;
-  if(p.full){PAGE_LIVE.rows.clear();PAGE_LIVE.crossRecords={};}
+  if(!p.full&&!p.rows.length&&!p.removed.length&&!Object.keys(p.meta).length&&!Object.keys(p.crossRecords).length&&!p.crossRemoved.length&&!(p.tvDetails?.length)&&!(p.tvDetailsRemoved?.length))return false;
+  if(p.full){PAGE_LIVE.rows.clear();PAGE_LIVE.crossRecords={};PAGE_LIVE.tvDetails.clear();}
   for(const row of p.rows)PAGE_LIVE.rows.set(row[0],row);
   for(const sym of p.removed)PAGE_LIVE.rows.delete(sym);
   Object.assign(PAGE_LIVE.crossRecords,p.crossRecords);
   for(const sym of p.crossRemoved)delete PAGE_LIVE.crossRecords[sym];
+  if(Array.isArray(p.tvDetails))for(const [sym,d] of p.tvDetails)PAGE_LIVE.tvDetails.set(sym,d);
+  if(Array.isArray(p.tvDetailsRemoved))for(const sym of p.tvDetailsRemoved)PAGE_LIVE.tvDetails.delete(sym);
   const prior=p.full?{}:BTST.rank||{},rank={...prior,...p.meta};
+  if(rank.tvScreener){
+    if(p.meta.tvScreener?.details){
+      PAGE_LIVE.tvDetails.clear();
+      for(const [sym,d] of Object.entries(p.meta.tvScreener.details))PAGE_LIVE.tvDetails.set(sym,d);
+    }else if(p.full||p.tvDetails?.length||p.tvDetailsRemoved?.length||!prior.tvScreener?.details){
+      rank.tvScreener={...rank.tvScreener,details:Object.fromEntries(PAGE_LIVE.tvDetails)};
+    }else if(prior.tvScreener?.details){
+      rank.tvScreener={...rank.tvScreener,details:prior.tvScreener.details};
+    }
+  }
   if(rank.cumulative){const c={...(prior.cumulative||{}),...(p.meta.cumulative||rank.cumulative)};
     c.upCross={...(prior.cumulative?.upCross||{}),...(p.meta.cumulative?.upCross||c.upCross||{}),records:{...PAGE_LIVE.crossRecords}};rank.cumulative=c;}
   const ordered=[...PAGE_LIVE.rows.values()].sort((a,b)=>a[5]-b[5]);
@@ -4896,7 +4908,7 @@ function syncSelectedModelFromHelper(){
     rememberModelChoice(model);
     RocketStrategy?.applySelectedModel(model);
     const brandTag=document.querySelector('.brand-tag');
-    if(brandTag)brandTag.textContent=model==='AVWAP_CROSS'?'5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':model==='TV_SCREENER'?'1m/5m/15m/1D Buy · Low 15m>VWAP · RelVol>1.1 · Sh>5k':model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Prior-Close Return Learning':'CUM - VWAP Trend & Breadth';
+    if(brandTag)brandTag.textContent=model==='AVWAP_CROSS'?'5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':model==='TV_SCREENER'?'1m/5m/15m/1D Buy · Low 30m>=VWAP · RelVol>1.1 · Sh>5k':model==='MARKOV_3PCT'?'Markov / mRMR / Ensemble (Option A)':model==='MRMR'?'Original mRMR · Prior-Close Return Learning':'CUM - VWAP Trend & Breadth';
     if(changedModel)initScoreFloorUI(true);
     refreshBtstModelView();
     _strategySyncSignature=model;
@@ -5244,11 +5256,13 @@ function getRowActionState(s){
   const pcKey=Number.isFinite(pctChg)?Math.round(pctChg*100):null;
   const bandKey=Number(s.price_band_pct??s.band)||null;
   const quote=_universeMap.get(s.symbol), priceAt=quote?.priceAt, priceSource=quote?.priceSource, tickAt=_universeTickAt, universeRev=_clientUniverseRev;
-  const safety=_streamConfirmed+':'+_freshEvidenceAfter+':'+BTST.v+':'+btstMinScore()+':'+(typeof TRADEBOOK_BUY_FILLS==='undefined'?0:TRADEBOOK_BUY_FILLS.length),heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
+  const ctrlMin=typeof executionControls!=='undefined'&&executionControls?Number(executionControls.minPositionRs)||0:null;
+  const turnKey=ctrlMin!=null?Math.floor((Number(s.turnover)||0)/1000):0;
+  const safety=_streamConfirmed+':'+_freshEvidenceAfter+':'+BTST.v+':'+btstMinScore()+':'+(typeof TRADEBOOK_BUY_FILLS==='undefined'?0:TRADEBOOK_BUY_FILLS.length)+':'+(ctrlMin??''),heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
   const cached=ROW_ACTION_MEMO.get(s);
-  if(cached&&cached.safety===safety&&cached.heldQty===heldQty&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.pcKey===pcKey&&cached.bandKey===bandKey&&cached.bookRev===bookRev&&cached.priceAt===priceAt&&cached.priceSource===priceSource&&cached.tickAt===tickAt&&cached.universeRev===universeRev) return cached.value;
+  if(cached&&cached.safety===safety&&cached.heldQty===heldQty&&cached.turnKey===turnKey&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.pcKey===pcKey&&cached.bandKey===bandKey&&cached.bookRev===bookRev&&cached.priceAt===priceAt&&cached.priceSource===priceSource&&cached.tickAt===tickAt&&cached.universeRev===universeRev) return cached.value;
   const value=_getRowActionStateUncached(s);
-  ROW_ACTION_MEMO.set(s,{safety,heldQty,a,b,c,d,e,score,px,pcKey,bandKey,bookRev,priceAt,priceSource,tickAt,universeRev,value});
+  ROW_ACTION_MEMO.set(s,{safety,heldQty,turnKey,a,b,c,d,e,score,px,pcKey,bandKey,bookRev,priceAt,priceSource,tickAt,universeRev,value});
   return value;
 }
 // A BOARD ON A STORED UNIVERSE IS NOT A RECOMMENDATION. Price, day change, turnover, ATR, range,
@@ -5341,6 +5355,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const ucBlock = upperCircuitBlock(s);
   if(ucBlock) return {state:'BLOCKED', reason:ucBlock};
   if(s.basketEligible === false) return {state:'BLOCKED', reason:'Non-EQ series or price band under 10%'};
+  const impactBlock = typeof marketImpactHardFilterReason==='function'?marketImpactHardFilterReason(s):null;
+  if(impactBlock) return {state:'BLOCKED', reason:impactBlock};
 
   if(floorModel()==='CUM'){
     const source=BTST.data;
@@ -5465,6 +5481,29 @@ function upperCircuitBlock(row){
       return `Up +${pc.toFixed(1)}% at the +${band}% upper circuit. Cannot be bought.`;
     if(pc>=19.9)
       return `Up +${pc.toFixed(1)}% at the maximum 20% upper circuit. Cannot be bought.`;
+  }
+  return null;
+}
+function marketImpactHardFilterReason(row){
+  if(!row||row._us||typeof executionControls==='undefined'||!executionControls||typeof getTurnoverAllocationCap!=='function') return null;
+  const px=Number(row.price);
+  if(!(px>0)) return null;
+  const liqCap=Number(getTurnoverAllocationCap(row))||0;
+  const hasDepth=typeof getBookLadder==='function'&&Boolean(getBookLadder(row.symbol));
+  if(!(liqCap>0)&&!(Number(row.turnover)>=0||hasDepth)) return null;
+  const minPos=Number(executionControls.minPositionRs)||0;
+  const held=typeof getHeldPositionMap==='function'?Boolean(getHeldPositionMap()[row.symbol]?.qty>0):false;
+  const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
+  const econShares=typeof RocketStrategy?.minSharesForStock==='function'?RocketStrategy.minSharesForStock(px,held,mlot):0;
+  const econFloor=econShares>0?econShares*px+(typeof calcZerodhaCharges==='function'?calcZerodhaCharges(px,econShares,false,false,false):0):0;
+  const floor=Math.max(econFloor,minPos);
+  if(!(floor>0)) return null;
+  const typedMax=typeof getTypedMaxAlloc==='function'?getTypedMaxAlloc(typeof getEffectiveCapital==='function'?getEffectiveCapital():0):0;
+  const cap=typedMax>0&&liqCap>0?Math.min(liqCap,typedMax):(typedMax>0?typedMax:liqCap);
+  if(!(cap>0)) return 'Market-impact/allocation cap unavailable (zero turnover/depth)';
+  if(cap+1e-7<floor){
+    const fmt=v=>'₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    return `Market-impact/allocation cap ${fmt(cap)} is below minimum ${fmt(floor)}`;
   }
   return null;
 }
@@ -5689,9 +5728,9 @@ function tvScreenerCell(s,key){
   if(key==='tvFilters'){
     const rv=Number.isFinite(d.relVolAtTime)?`${d.relVolAtTime.toFixed(2)}x`:'—';
     const sh=Number.isFinite(d.shareholders)?(d.shareholders>=1000?(d.shareholders/1000).toFixed(1)+'k':String(d.shareholders)):'—';
-    const lv=d.low15m!=null&&d.vwap15m!=null?(d.lowVwapOk?'15m>VWAP':'15m<=VWAP'):'—';
+    const lv=d.low30m!=null&&d.vwap30m!=null?(d.lowVwapOk?'30m>=VWAP':'30m<VWAP'):'—';
     const turn=Number.isFinite(d.priceVol)?'₹'+(d.priceVol/1e6).toFixed(1)+'M':'—';
-    const tip=`Price range: ${d.priceOk?'OK':'OUT'} | Turnover: ${turn} (>5M) | RelVol(5m): ${rv} (>1.1) | Shareholders: ${d.shareholders??'loading'} (>5000) | 15m Low: ${d.low15m!=null?'₹'+d.low15m.toFixed(2):'—'} vs VWAP ${d.vwap15m!=null?'₹'+d.vwap15m.toFixed(2):'—'}`;
+    const tip=`Price range: ${d.priceOk?'OK':'OUT'} | Turnover: ${turn} (>5M) | RelVol(5m): ${rv} (>1.1) | Shareholders: ${d.shareholders??'loading'} (>5000) | 30m Low: ${d.low30m!=null?'₹'+d.low30m.toFixed(2):'—'} vs VWAP ${d.vwap30m!=null?'₹'+d.vwap30m.toFixed(2):'—'}`;
     return `<div style="font-size:12px;white-space:nowrap;font-family:'DM Mono',monospace" title="${escHtml(tip)}"><span style="color:var(--${d.relVolOk?'green':'red'})">${rv}</span> <span style="color:var(--t3)">·</span> <span style="color:var(--${d.shOk?'green':'red'})">${sh} sh</span> <span style="color:var(--t3)">·</span> <span style="color:var(--${d.lowVwapOk?'green':'amber'})">${lv}</span></div>`;
   }
   return none;
@@ -9670,7 +9709,8 @@ function buildOpenPositionsPanel(query=''){
     const targetPct=tapePolicy.targetPct;
     const baseQty=qty;
     // Holding age is informational and never forces an exit.
-    const radarScore=btstScoreOf(pos.symbol);
+    const tvDetail=floorModel()==='TV_SCREENER'?tvScreenerDetail({symbol:pos.symbol}):null;
+    const radarScore=tvDetail?Number(tvDetail.ratingsPassedCount):btstScoreOf(pos.symbol);
     const radarRank=btstRankOf(pos.symbol);
     rows.push({
       sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,tapeStopPrice,
@@ -9678,7 +9718,7 @@ function buildOpenPositionsPanel(query=''){
       signal:tapePolicy.signal,signalSort:tapePolicy.signalSort,
       flow:Number.isFinite(tapePolicy.flowPct)?+tapePolicy.flowPct.toFixed(2):null,
       baseQty,
-      score:radarScore,rank:radarRank,
+      score:radarScore,rank:radarRank,tvDetail,
       vwapGap:useVwapGap?avwapGapOf(pos.symbol):null,
       setup:scannerRow?.setup||'',
       dayPct:Number.isFinite(tapePolicy.price)&&tapePolicy.open>0
@@ -9813,6 +9853,16 @@ function buildOpenPositionsPanel(query=''){
     useVwapGap
       ?{key:'vwapGap',label:'VWAP Gap',align:'right',bold:true,
         fmt:(v,row)=>avwapTableCell({symbol:row.sym},'vwapGap'),clrFn:()=>'var(--t1)'}
+      :floorModel()==='TV_SCREENER'
+      ?{key:'score',label:'Model Score',align:'right',bold:true,
+        fmt:(v,row)=>{
+          const d=row.tvDetail||tvScreenerDetail({symbol:row.sym});
+          if(!d)return '<span style="color:var(--t3)" title="Awaiting MTF Ratings Screener evaluation">—</span>';
+          const badge=tvScreenerCell({symbol:row.sym},'tvRatings');
+          const rk=row.rank!=null?`<span style="font-size:11px;color:var(--t3)"> #${row.rank}</span>`:'';
+          return `<div style="display:inline-flex;align-items:center;gap:4px">${badge}${rk}</div>`;
+        },
+        clrFn:()=>'var(--t1)'}
       :{key:'score',label:'Model Score',align:'right',bold:true,
         fmt:(v,row)=>modelScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'\u2014'}</span>`,
         clrFn:()=>'var(--t1)'},
@@ -10753,7 +10803,7 @@ function getCols(){
   if(floorModel()==='TV_SCREENER')return [
     {key:'defaultRank',label:'Priority<br>(Day % ↑)',s:1},{key:'symbol',label:'Stock',s:1},
     {key:'status',label:'Entry status',s:1},{key:'price',label:'Price · Day %',s:1},
-    {key:'tvRatings',label:'1m / 5m / 15m / 1D',s:1},{key:'tvFilters',label:'RelVol · Sh · 15m>VWAP',s:1},
+    {key:'tvRatings',label:'1m / 5m / 15m / 1D',s:1},{key:'tvFilters',label:'RelVol · Sh · 30m>=VWAP',s:1},
     {key:'exit',label:'-1% SL / Ratchet',s:0},{key:'alloc',label:'Allocation',s:1}
   ];
   // User-dragged column order (v536) applies here so header and cells always agree.
@@ -12316,7 +12366,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'1st 5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':floorModel()==='TV_SCREENER'?'1m/5m/15m/1D Buy · RelVol>1.1 · Low15m>VWAP · Sh>5k':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:floorModel()==='TV_SCREENER'?'rs-sl1pct-atr-ratchet-v1':'rs-trail-min5-v2'}}};
+  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'1st 5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':floorModel()==='TV_SCREENER'?'1m/5m/15m/1D Buy · RelVol>1.1 · Low30m>=VWAP · Sh>5k':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:floorModel()==='TV_SCREENER'?'rs-sl1pct-atr-ratchet-v1':'rs-trail-min5-v2'}}};
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
@@ -14410,7 +14460,7 @@ function emptyBoardReason(){
   if(floorModel()==='TV_SCREENER'){
     const tvs=(BTST.data||BTST.rank)?.tvScreener;
     if(!tvs?.ok)return 'Awaiting MTF Ratings Screener evaluation: '+escHtml(tvs?.progress?.reason||'computing 1m/5m/15m/1D ratings & NSE shareholders')+'.';
-    return `No qualifying matches: ${tvs.counts?.ratings12||0} cleared 12/12 Buy ratings, ${tvs.counts?.lowVwap||0} passed Price/Turnover/RelVol/Shareholders/15m Low>VWAP out of ${tvs.counts?.universe||0} NSE stocks. Use Show ineligible to inspect.`;
+    return `No qualifying matches: ${tvs.counts?.ratings12||0} cleared 12/12 Buy ratings, ${tvs.counts?.lowVwap||0} passed Price/Turnover/RelVol/Shareholders/30m Low>=VWAP out of ${tvs.counts?.universe||0} NSE stocks. Use Show ineligible to inspect.`;
   }
   if(floorModel()==='MRMR'){
     const source=BTST.data||BTST.rank,mrmr=source?.mrmr;
@@ -14760,7 +14810,7 @@ function renderStatusBar(){
     const ready=tvs?.ok===true&&age>=0&&age<=180000;
     const shCnt=tvs?.shareholders?.cachedCount??0;
     const scoreStatus=tvs?.ok?`${tvs.counts?.passed??0} passed · 12/12: ${tvs.counts?.ratings12??0} · Sh:${shCnt}`:(tvs?.progress?.reason||'Warming screener state…');
-    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(tvs?.progress?.reason||'MTF Ratings Screener (1m/5m/15m/1D Buy + RelVol>1.1 + 15m Low>VWAP + Sh>5k)')}">MTF Screener: ${escHtml(scoreStatus)}</span>`);
+    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(tvs?.progress?.reason||'MTF Ratings Screener (1m/5m/15m/1D Buy + RelVol>1.1 + 30m Low>=VWAP + Sh>5k)')}">MTF Screener: ${escHtml(scoreStatus)}</span>`);
   }
   if(NSE_REPORTS_STATUS){
     const nse=NSE_REPORTS_STATUS;
@@ -15167,9 +15217,9 @@ function startStreamRefresh(){
   // v1512: a background tab's timers are throttled to about once a minute (16 Oct HBLENGINE/SOLARA expired unclaimed).
   // A worker's timer is not, so its 2 s tick drives the claim; the plain interval stays as the fallback.
   if(!startStreamRefresh.nativeEntry){
-    startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),500);
+    startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),250);
     try{
-      const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),500)'],{type:'text/javascript'})));
+      const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),250)'],{type:'text/javascript'})));
       w.onmessage=()=>{if(!document.hidden)return;try{hiddenEntryBeat();}catch(e){console.warn('Hidden entry beat',e);}syncNativeKiteEntries().catch(()=>{});};
       startStreamRefresh.nativeWorker=w;
     }catch(e){}
@@ -16099,9 +16149,10 @@ let _kiteTransferBusy=false,_kiteSyncTimer=null,_kiteSentSignature='',_kiteSentA
 // An unchanged plan is re-checked against Kite every minute; the bridge leaves an identical basket untouched,
 // refills a cleared one, and never rewrites a non-empty basket that is open on screen.
 const KITE_BASKET_RESYNC_MS=60000;
-function scheduleKiteBasketSync(delay=500){
+function scheduleKiteBasketSync(delay){
   if(_kiteSyncTimer||_kiteTransferBusy) return;
-  _kiteSyncTimer=setTimeout(()=>{_kiteSyncTimer=null;sendBasketToKite(true);},delay);
+  const ms=delay!==undefined?delay:(AUTO_BUY_ENABLED&&AUTO_BUY_STATUS?.mode==='browser-ioc'?50:500);
+  _kiteSyncTimer=setTimeout(()=>{_kiteSyncTimer=null;sendBasketToKite(true);},ms);
 }
 // Every Kite basket outcome goes to the phone through the helper's ntfy push: the basket-file alert alone
 // cannot say whether Scanner_Buy was actually updated. The helper de-duplicates repeats.

@@ -1153,14 +1153,14 @@ function bookedSession(session,holdingCosts,tradebook){
       return {state:'WAIT',reason:'Awaiting current MTF Ratings Screener evaluation'};
     }
     const at=Date.parse(source.tvScreener?.asOf||source.asOf||'');
-    if(source.ok!==true||source.tvScreener?.ok!==true||!Number.isFinite(at)||now<at||now-at>180000){
+    if(source.ok!==true||source.tvScreener?.ok!==true||!Number.isFinite(at)||now-at<-2000||now-at>180000){
       return {state:'WAIT',reason:'Awaiting fresh MTF Ratings Screener scores'};
     }
     if(!nseContinuous(now,sym))return {state:'WAIT',reason:'Outside continuous trading session'};
     const ready=memQuoteState(quote,now);if(ready.state!=='READY')return ready;
     const pick=source.picks?.find(p=>p.symbol===sym);
     if(!pick?.triggered||!source.crossings?.includes(sym)){
-      return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting all 12 Buy/Strong Buy ratings + liquidity & 15m VWAP filters'};
+      return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting all 12 Buy/Strong Buy ratings + liquidity & 30m VWAP filters'};
     }
     return {state:'GO',score:1,dayPct:pick.dayPct??null,exitPolicy:TV_SCREENER_EXIT_POLICY,reason:pick.why};
   }
