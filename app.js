@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-20 14:10 IST'; // release build date (IST)
-const APP_VERSION=1763;
+const BUILD_TS='2026-11-20 14:55 IST'; // release build date (IST)
+const APP_VERSION=1764;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='MRMR'?'Original mRMR':v==='AVWAP_CROSS'?'VWAP / T-2 AVWAP Cross (5m)':v==='TV_SCREENER'?'TradingView Screener (1m/5m/15m/1D)':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='MRMR'?'Original mRMR':v==='AVWAP_CROSS'?'VWAP / T-2 AVWAP Cross (5m)':v==='TV_SCREENER'?'MTF Ratings Screener (1m/5m/15m/1D)':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
@@ -1668,7 +1668,7 @@ function chartLinkButtons(sym,extraStyle=''){
       +` title="Open ${escHtml(s)} on the Zerodha Kite chart"`
       +` style="${base}border:1px solid rgba(56,189,248,.35);background:rgba(56,189,248,.10);color:var(--cyan);${extraStyle}">Z</button>`
     +`<button type="button" onclick='event.stopPropagation();tradingViewOpen(${JSON.stringify(n)})'`
-      +` title="Open ${escHtml(s)} on TradingView"`
+      +` title="Open ${escHtml(s)} on external chart"`
       +` style="${base}border:1px solid rgba(148,163,184,.35);background:rgba(148,163,184,.12);color:var(--t2);${extraStyle}">T</button>`;
 }
 function kitePublisherKey(login){
@@ -3743,7 +3743,7 @@ function modelBadgeHtml(model,note=''){
 }
 function enabledModelsLabel(){
   const m = selectedBtstModel();
-  return m==='AVWAP_CROSS'?'VWAP / T-2 AVWAP Cross (5m)':m==='TV_SCREENER'?'TradingView Screener':m==='MARKOV_3PCT'?'Markov / mRMR / Ensemble':m==='MRMR'?'Original mRMR':(m==='CUM'?'Cumulative Change':m);
+  return m==='AVWAP_CROSS'?'VWAP / T-2 AVWAP Cross (5m)':m==='TV_SCREENER'?'MTF Ratings Screener':m==='MARKOV_3PCT'?'Markov / mRMR / Ensemble':m==='MRMR'?'Original mRMR':(m==='CUM'?'Cumulative Change':m);
 }
 function dualScoreCell(row){
   if(!row._us&&floorModel()==='AVWAP_CROSS')return avwapTableCell(row,'cross');
@@ -3819,7 +3819,7 @@ function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
   if(floorModel()==='AVWAP_CROSS')return 'Binary entry: 1st completed 5m close crossing above HLC/3 AVWAP anchored at T-2 session open on 4 contiguous rising candles, 0.20%-0.60% VWAP jump, >0.8% room to T-2/T-1 high, and candle CLV >= 0.75. First and last candles excluded.';
-  if(floorModel()==='TV_SCREENER')return 'TradingView Screener: 1m/5m/15m/1D MA, Oscillator & Tech ratings all Buy/Strong Buy, Price 25-1200, Price*Vol > 5M, RelVol > 1.1, Shareholders > 5k, Low 15m > VWAP. Sorted Day % ascending; -1% SL + immediate ATR ratchet.';
+  if(floorModel()==='TV_SCREENER')return `MTF Ratings Screener: 1m/5m/15m/1D MA, Oscillator & Tech ratings all Buy/Strong Buy, Price 25-${getScreenerMaxPrice()}, Price*Vol > 5M, RelVol > 1.1, Shareholders > 5k, Low 15m > VWAP. Sorted Day % ascending; fixed -1% SL until current ATR ratchet arms.`;
   if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
@@ -4462,8 +4462,13 @@ function floorModel(){ return selectedBtstModel(); }
 function scoreFloorStore(model=floorModel()){return model==='CUM'?'rs_cumulative_score_floor':model==='MARKOV_3PCT'?'rs_markov_ensemble_score_floor_v1':model==='MRMR'?'rs_mrmr_score_floor_v1':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
-    const el=document.getElementById('fScoreFloor'),wrap=document.getElementById('scoreFloorWrap'),model=floorModel();
+    const el=document.getElementById('fScoreFloor'),wrap=document.getElementById('scoreFloorWrap'),maxWrap=document.getElementById('screenerMaxPriceWrap'),model=floorModel();
     if(wrap)wrap.style.display=['CUM','AVWAP_CROSS','TV_SCREENER'].includes(model)?'none':'';
+    if(maxWrap)maxWrap.style.display=model==='TV_SCREENER'?'':'none';
+    if(model==='TV_SCREENER'){
+      const mp=document.getElementById('fScreenerMaxPrice');
+      if(mp&&!executionControlDirty.has('screenerMaxPrice')&&document.activeElement!==mp)mp.value=getScreenerMaxPrice();
+    }
     if(model==='AVWAP_CROSS'||model==='TV_SCREENER'){if(el){el.value='1';el.readOnly=true;}_scoreFloorSeeded=model;updateModeUI();return;}
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     el.readOnly=model==='MARKOV_3PCT';
@@ -4854,7 +4859,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',AVWAP_CROSS:'VWAP / T-2 AVWAP Cross (5m)',TV_SCREENER:'TradingView Screener',MARKOV_3PCT:'Markov · mRMR · Ensemble',MRMR:'Original mRMR',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',AVWAP_CROSS:'VWAP / T-2 AVWAP Cross (5m)',TV_SCREENER:'MTF Ratings Screener',MARKOV_3PCT:'Markov · mRMR · Ensemble',MRMR:'Original mRMR',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -5398,11 +5403,11 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     const src=btstRanking()?.src;
     if(!src||src.activeModel!=='TV_SCREENER'||!src.tvScreener?.ok){
-      return {state:'WAIT',reason:src?.tvScreener?.progress?.reason||'Awaiting TradingView Screener evaluation'};
+      return {state:'WAIT',reason:src?.tvScreener?.progress?.reason||'Awaiting MTF Ratings Screener evaluation'};
     }
     const detail=src.tvScreener?.details?.[sym];
     const decision=RocketStrategy.tvScreenerEntryState(src,sym,_universeMap.get(s.symbol),Date.now());
-    if(decision.state!=='GO')return {state:'WAIT',reason:decision.reason||detail?.reason||'Waiting for TradingView Screener match'};
+    if(decision.state!=='GO')return {state:'WAIT',reason:decision.reason||detail?.reason||'Waiting for MTF Ratings Screener match'};
     const price=Number(s.price);
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
     return {
@@ -6717,7 +6722,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
     const _quietRise=_drift!=null&&_drift>0&&_dayPct>0&&!_partReady;
     const _preResults={
       resultsDate:_resDate,
-      resultsSource:_bmDate?'NSE board meeting':(_resDate?'TradingView upcoming earnings':null),
+      resultsSource:_bmDate?'NSE board meeting':(_resDate?'Scanner upcoming earnings':null),
       daysToResults:_daysToRes,
       weekChangePct:_weekChg,
       driftPct:_drift,
@@ -8195,13 +8200,17 @@ function kiteGttsFor(sym){
 var PROFIT_LOCK_STATUS={bySym:new Map(),at:0};
 let executionControls=null;
 const executionControlDirty=new Set();
+function getScreenerMaxPrice(){
+  const v=Number(executionControls?.screenerMaxPrice);
+  return Number.isFinite(v)&&v>=25?v:1200;
+}
 function applyExecutionControls(controls){
   if(!controls||!Number.isInteger(controls.minPositionRs)||!Number.isInteger(controls.maxPositionRs)||!Number.isFinite(controls.targetExtraPct))return;
   const changed=JSON.stringify(executionControls)!==JSON.stringify(controls);
   executionControls=controls;
   const lbl=document.getElementById('fTargetExtraLabel');
   if(lbl)lbl.textContent=controls.targetExtraSource==='manual'?'Swap target + % (manual)':'Swap target + % (auto)';
-  for(const [key,id] of [['targetExtraPct','fTargetExtra'],['minPositionRs','fMinPosition'],['maxPositionRs','fMaxPosition']]){
+  for(const [key,id] of [['targetExtraPct','fTargetExtra'],['minPositionRs','fMinPosition'],['maxPositionRs','fMaxPosition'],['screenerMaxPrice','fScreenerMaxPrice']]){
     const el=document.getElementById(id);
     if(!el)continue;
     if(key==='targetExtraPct'){
@@ -8210,28 +8219,31 @@ function applyExecutionControls(controls){
       if(!executionControlDirty.has(key)&&document.activeElement!==el){
         el.value=controls.targetExtraSource==='mlot-weighted-median'?Number(controls[key]).toFixed(2):controls[key];
       }
-    }else if(!executionControlDirty.has(key)&&document.activeElement!==el)el.value=controls[key];
+    }else if(!executionControlDirty.has(key)&&document.activeElement!==el){
+      el.value=key==='screenerMaxPrice'?(controls[key]??1200):controls[key];
+    }
   }
-  if(changed){_dualPlanMemo=null;_usPlanMemo=null;if(typeof renderStats==='function')renderStats();}
+  if(changed){_dualPlanMemo=null;_usPlanMemo=null;if(typeof updateModeUI==='function')updateModeUI();if(typeof renderStats==='function')renderStats();}
 }
 // 16 Nov 2026 (owner): Min/Max position (rupees) replace "Stocks per allocation" for normal allocation buys.
 async function saveExecutionControl(key,el){
   const raw=el.value.trim(),isPos=key==='minPositionRs'||key==='maxPositionRs';
-  if(key==='targetExtraPct'&&raw===''){
+  if((key==='targetExtraPct'||key==='screenerMaxPrice')&&raw===''){
     el.disabled=true;
     try{
-      const result=await readHelperResponse('/api/execution-controls',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({targetExtraPct:null,targetExtraManual:false}),timeout:8000});
-      if(!result?.ok)throw Error(result?.why||'Could not reset target addition');
+      const resetBody=key==='targetExtraPct'?{targetExtraPct:null,targetExtraManual:false}:{screenerMaxPrice:null};
+      const result=await readHelperResponse('/api/execution-controls',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(resetBody),timeout:8000});
+      if(!result?.ok)throw Error(result?.why||'Could not reset execution control');
       executionControlDirty.delete(key);applyExecutionControls(result.controls);
       if(typeof applyFilters==='function')applyFilters({preservePage:true});
-      showToast('Target addition: auto (+'+Number(result.controls.targetExtraPct).toFixed(2)+'%)');
+      showToast(key==='targetExtraPct'?'Target addition: auto (+'+Number(result.controls.targetExtraPct).toFixed(2)+'%)':'Screener max price: ₹'+Number(result.controls.screenerMaxPrice||1200).toLocaleString('en-IN'));
     }catch(e){showToast('Not saved: '+e.message,6000,true);}finally{el.disabled=false;}
     return;
   }
   const value=Number(raw);
   const other=key==='minPositionRs'?executionControls?.maxPositionRs:key==='maxPositionRs'?executionControls?.minPositionRs:null;
-  const valid=raw!==''&&Number.isFinite(value)&&(isPos?Number.isInteger(value)&&value>=(key==='maxPositionRs'?1000:0)&&value<=1e8&&(other==null||(key==='minPositionRs'?value<=other:value>=other)):value>=0&&value<=100);
-  if(!valid){showToast(isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100% (or clear for auto).',5000,true);return;}
+  const valid=raw!==''&&Number.isFinite(value)&&(key==='screenerMaxPrice'?value>=25&&value<=1e6:isPos?Number.isInteger(value)&&value>=(key==='maxPositionRs'?1000:0)&&value<=1e8&&(other==null||(key==='minPositionRs'?value<=other:value>=other)):value>=0&&value<=100);
+  if(!valid){showToast(key==='screenerMaxPrice'?'Enter a screener max price from ₹25 to ₹10,00,000 (or clear for ₹1,200).':isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100% (or clear for auto).',5000,true);return;}
   el.disabled=true;
   try{
     const payload=key==='targetExtraPct'?{targetExtraPct:value,targetExtraManual:true}:{[key]:value};
@@ -8239,7 +8251,7 @@ async function saveExecutionControl(key,el){
     if(!result?.ok)throw Error(result?.why||'Could not save execution control');
     executionControlDirty.delete(key);applyExecutionControls(result.controls);
     if(typeof applyFilters==='function')applyFilters({preservePage:true});
-    showToast(key==='minPositionRs'?'Min position: ₹'+value.toLocaleString('en-IN'):key==='maxPositionRs'?'Max position: ₹'+value.toLocaleString('en-IN'):'Target addition (manual): +'+value+' percentage points');
+    showToast(key==='minPositionRs'?'Min position: ₹'+value.toLocaleString('en-IN'):key==='maxPositionRs'?'Max position: ₹'+value.toLocaleString('en-IN'):key==='screenerMaxPrice'?'Screener max price: ₹'+value.toLocaleString('en-IN'):'Target addition (manual): +'+value+' percentage points');
   }catch(e){showToast('Not saved: '+e.message,6000,true);}finally{el.disabled=false;}
 }
 let lossFundingDirty=false;
@@ -10710,7 +10722,7 @@ function _renderMethodologyInner(){
     <details id="meth-models" class="meth-detail"><summary>Models, scoring and exits</summary><h3>Live score-crossing engine</h3>
     <p>The selected model supplies the recommendation table, counts, allocation and basket. Markov / mRMR / Ensemble filters for a green prior week and at least two completed red days with a cumulative drop of at least 3%, applies causal regime-specific mRMR weights, then ranks candidates with the five Ensemble learners. It selects at most five positive Ensemble scores, with an automatic cutoff at the weakest selected score. Regime-specific mRMR weights and the relative cutoff change with the market; no fixed 0.5 floor or saturation cap applies. Fresh price must reclaim session VWAP without exceeding it by 1.5%. Only candidates passing those live checks have numeric recommendation scores. Account, cash and broker checks still apply. Market-wide reference features remain intact; selection is not recalibrated on just five stocks. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
     <div class="m-grid">
-    <div class="m-card"><h4>Combined Ensemble: adaptive top five</h4><p>Five learners (return regressor, target classifier, excess-over-market, downside quantile, extra-trees) trained on causal regime-weighted vectors from up to 220 prior sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend averages their percentile ranks and uses the existing calibrated score scale. Only the five highest strictly positive scores enter the VWAP watchlist; the cutoff follows the current distribution.</p></div>
+    <div class="m-card"><h4>Combined Ensemble: adaptive top five</h4><p>Five learners (return regressor, target classifier, excess-over-market, downside quantile, extra-trees) trained on causal regime-weighted vectors from up to 220 prior sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, multi-timeframe technical ratings, sector strength, market condition). The blend averages their percentile ranks and uses the existing calibrated score scale. Only the five highest strictly positive scores enter the VWAP watchlist; the cutoff follows the current distribution.</p></div>
     <div class="m-card"><h4>CUM - VWAP Trend &amp; Breadth</h4><p>Native ten-second VWAP-gap zero crossing and original positive score below +0.5. A native two-rise trigger is consumed when it fires; only a second rise greater than three times the first passes. Price must be above session VWAP and the 09:15-09:29 opening high after 09:30. The frozen March-selected 200-stock sample needs at least 100 fresh quotes and 50% above their opens. Previous completed stock close must exceed EMA20 &gt; EMA50, and at least 60% of sample prior closes must exceed EMA20. Missing context waits. Shared score allocation, held-add/rebuy rules, fees, liquidity and trailing exits apply, with no minimum or maximum hold. Account replay shows modeled trades using the recorded account snapshot; it is not exact tick or broker performance.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
@@ -12351,7 +12363,7 @@ function usRowHtml(r){
     chk:`<td style="text-align:center"><input type="checkbox" disabled title="US stock: suggest-only, place it in IBKR yourself" style="width:14px;height:14px"></td>`,
     rank:'<td style="text-align:right;color:var(--t3)">—</td>',
     score:`<td data-key="score" style="text-align:center" title="US model score vs the US floor ${r.fl}"><span style="font-weight:800;font-family:'DM Mono',monospace;color:${r.score>=r.fl?'var(--green)':'var(--amber)'}">${sc}</span><span style="font-size:13px;color:var(--t3)"> / ${r.fl}</span></td>`,
-    symbol:`<td data-key="symbol" style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:15px;color:var(--t1)">🇺🇸 ${escHtml(r.symbol)} <a href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(r.symbol)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:13px;color:var(--cyan);text-decoration:none" title="TradingView chart">T</a></div><div style="font-size:13px;color:var(--t3);max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(r.sector||'')}</div></td>`,
+    symbol:`<td data-key="symbol" style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:15px;color:var(--t1)">🇺🇸 ${escHtml(r.symbol)} <a href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(r.symbol)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:13px;color:var(--cyan);text-decoration:none" title="External chart">T</a></div><div style="font-size:13px;color:var(--t3);max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(r.sector||'')}</div></td>`,
     status:`<td data-key="status" class="recommendation-status">${status}</td>`,
     price:`<td data-key="price" style="white-space:nowrap">${usd(r.price)}<span style="color:var(--t3)"> · </span><span style="font-size:13px">${fPerf(chg)}</span></td>`,
     day:`<td>${fPerf(chg)}</td>`,
@@ -14397,7 +14409,7 @@ function emptyBoardReason(){
   if(floorModel()==='AVWAP_CROSS')return 'Waiting for 1st 5m close crossing above T-2 AVWAP on 4 rising candles, 0.20%-0.60% VWAP jump, >0.8% room to T-2/T-1 high, and CLV >= 0.75 after hard filters. First and last candles excluded. Use Show ineligible for reasons.';
   if(floorModel()==='TV_SCREENER'){
     const tvs=(BTST.data||BTST.rank)?.tvScreener;
-    if(!tvs?.ok)return 'Awaiting TradingView Screener evaluation: '+escHtml(tvs?.progress?.reason||'computing 1m/5m/15m/1D ratings & NSE shareholders')+'.';
+    if(!tvs?.ok)return 'Awaiting MTF Ratings Screener evaluation: '+escHtml(tvs?.progress?.reason||'computing 1m/5m/15m/1D ratings & NSE shareholders')+'.';
     return `No qualifying matches: ${tvs.counts?.ratings12||0} cleared 12/12 Buy ratings, ${tvs.counts?.lowVwap||0} passed Price/Turnover/RelVol/Shareholders/15m Low>VWAP out of ${tvs.counts?.universe||0} NSE stocks. Use Show ineligible to inspect.`;
   }
   if(floorModel()==='MRMR'){
@@ -14748,7 +14760,7 @@ function renderStatusBar(){
     const ready=tvs?.ok===true&&age>=0&&age<=180000;
     const shCnt=tvs?.shareholders?.cachedCount??0;
     const scoreStatus=tvs?.ok?`${tvs.counts?.passed??0} passed · 12/12: ${tvs.counts?.ratings12??0} · Sh:${shCnt}`:(tvs?.progress?.reason||'Warming screener state…');
-    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(tvs?.progress?.reason||'TradingView Screener (1m/5m/15m/1D Buy + RelVol>1.1 + 15m Low>VWAP + Sh>5k)')}">TV Screener: ${escHtml(scoreStatus)}</span>`);
+    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(tvs?.progress?.reason||'MTF Ratings Screener (1m/5m/15m/1D Buy + RelVol>1.1 + 15m Low>VWAP + Sh>5k)')}">MTF Screener: ${escHtml(scoreStatus)}</span>`);
   }
   if(NSE_REPORTS_STATUS){
     const nse=NSE_REPORTS_STATUS;
@@ -16499,7 +16511,7 @@ function applySavedFiltersForMode(mode){
   let completed=false;
   MARKET_MODE=mode;
   try{
-    setLoadMsg('Parsing stock TradingView data...');
+    setLoadMsg('Parsing stock scanner CSV data...');
     const text=await scannerFile.text();
     const raw=parseCSV(text);
     const ok=isAllNseFilename(scannerFile.name)||looksLikeAllNseRows(raw);
@@ -16886,7 +16898,7 @@ async function processFilesImpl(files,sourceLabel,opts={}){
   if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
     if(!silent){
       setLoading(false);
-      showToast('TradingView CSV not found in the selected Scanner Uploads folder.',4000,true);
+      showToast('Universe scanner CSV not found in the selected Scanner Uploads folder.',4000,true);
     }
     return false;
   }

@@ -1150,11 +1150,11 @@ function bookedSession(session,holdingCosts,tradebook){
   function tvScreenerEntryState(source,symbol,quote,now=Date.now()) {
     const sym=String(symbol||'').toUpperCase();
     if(source?.activeModel!=='TV_SCREENER'||source?.rules?.pickPolicy!==TV_SCREENER_POLICY||source?.session!==nseClock(now).day){
-      return {state:'WAIT',reason:'Awaiting current TradingView Screener evaluation'};
+      return {state:'WAIT',reason:'Awaiting current MTF Ratings Screener evaluation'};
     }
     const at=Date.parse(source.tvScreener?.asOf||source.asOf||'');
     if(source.ok!==true||source.tvScreener?.ok!==true||!Number.isFinite(at)||now<at||now-at>180000){
-      return {state:'WAIT',reason:'Awaiting fresh TradingView Screener scores'};
+      return {state:'WAIT',reason:'Awaiting fresh MTF Ratings Screener scores'};
     }
     if(!nseContinuous(now,sym))return {state:'WAIT',reason:'Outside continuous trading session'};
     const ready=memQuoteState(quote,now);if(ready.state!=='READY')return ready;
