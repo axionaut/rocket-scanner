@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-21 09:53 IST'; // release build date (IST)
-const APP_VERSION=1766;
+const BUILD_TS='2026-11-21 10:06 IST'; // release build date (IST)
+const APP_VERSION=1767;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -580,9 +580,11 @@ const FS = (() => {
   const CLIENT_ID_STORE = 'rs_google_client_id';
   const PROVIDER_STORE = 'rs_cloud_provider';
   const SESSION_STORE = 'rs_drive_access_v1';
+  const HINT_STORE = 'rs_drive_hint_v1';
   const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
   const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
   const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
+  const DRIVE_ABOUT = 'https://www.googleapis.com/drive/v3/about';
   const LOCAL_DB = 'rocket_scanner_local_brain_v1';
   const LOCAL_STORE = 'brain';
   const LOCAL_KEY = 'rocket_brain';
@@ -610,6 +612,17 @@ const FS = (() => {
   }
   function isConfigured(){ return !!clientId(); }
   function isConnected(){ return !!_accessToken&&Date.now()<_expiresAt-30000; }
+  function isExpiringSoon(){ return !!_accessToken&&Date.now()>=_expiresAt-300000; }
+  function savedHint(){ try{return String(localStorage.getItem(HINT_STORE)||'').trim();}catch(e){return '';} }
+  async function rememberDriveAccountHint(){
+    if(!isConnected()) return null;
+    try{
+      const data=await (await request(DRIVE_ABOUT+'?fields=user(emailAddress)',{timeoutMs:5000})).json();
+      const email=String(data?.user?.emailAddress||'').trim();
+      if(email) try{localStorage.setItem(HINT_STORE,email);}catch(e){}
+      return email||null;
+    }catch(e){return null;}
+  }
   function clearSession(){
     _accessToken=null;_expiresAt=0;
     _fileCache=null;_listFilesPromise=null;
@@ -667,6 +680,7 @@ const FS = (() => {
       }catch(e){console.warn('Silent Drive reconnect failed',e);}
     }
     if(!isConnected()) return localBrain;
+    if(!savedHint()) void rememberDriveAccountHint();
     try{
       const brain=await read();
       return mergeCumulativeBrain(localBrain,brain);
@@ -677,6 +691,7 @@ const FS = (() => {
     const silent=!!opts.silent;
     if(!isConfigured()) return {ok:false,reason:'missing_client_id'};
     if(!(await waitForGIS())) return {ok:false,reason:'google_library'};
+    const hint=savedHint();
     return new Promise(resolve=>{
       let settled=false,timer=null;
       const finish=val=>{if(settled)return;settled=true;if(timer)clearTimeout(timer);resolve(val);};
@@ -684,8 +699,12 @@ const FS = (() => {
       _tokenClient=google.accounts.oauth2.initTokenClient({
         client_id:clientId(),
         scope:SCOPE,
+        ...(hint?{login_hint:hint}:{}),
         callback:async response=>{
           if(response?.error||!response?.access_token){
+            if(!silent&&hint&&['invalid_request','login_required','access_denied','invalid_user'].includes(response?.error)){
+              try{localStorage.removeItem(HINT_STORE);}catch(e){}
+            }
             finish({ok:false,reason:response?.error||'authorization_failed'});return;
           }
           _accessToken=response.access_token;
@@ -693,7 +712,8 @@ const FS = (() => {
           localStorage.setItem(PROVIDER_STORE,'drive');
           try{sessionStorage.setItem(SESSION_STORE,JSON.stringify({token:_accessToken,expiresAt:_expiresAt}));}catch(e){}
           updateFolderUI();
-          _fileCache=null;
+          void rememberDriveAccountHint();
+          _fileCache=null;_listFilesPromise=null;
           try{await listAppDataFiles(true);}catch(e){console.warn('Drive file index refresh failed after connect',e);}
           let brain=null;
           try{brain=await read();}catch(e){console.warn('Drive brain read failed after connect',e);}
@@ -701,7 +721,7 @@ const FS = (() => {
         },
         error_callback:()=>finish({ok:false,reason:'popup_failed'})
       });
-      _tokenClient.requestAccessToken({prompt:silent?'':''});
+      _tokenClient.requestAccessToken({prompt:'',...(hint?{login_hint:hint}:{})});
     });
   }
 
@@ -1172,7 +1192,7 @@ const FS = (() => {
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
   function getActiveLocalDirectoryHandle(){ return _localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,setUserSetting,get,getFilterMirror,setFilterMirror,removeFilterMirror,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,isExpiringSoon,getHint:savedHint,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,setUserSetting,get,getFilterMirror,setFilterMirror,removeFilterMirror,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle};
 })();
 
 function updateFolderUI(){
@@ -1198,9 +1218,14 @@ function updateFolderUI(){
 }
 setInterval(()=>{try{updateFolderUI();}catch(e){}},30000);
 
-let _driveSilentReconnect=null;
+let _driveSilentReconnect=null,_proactiveDriveAttemptAt=0;
 async function maintainDriveSession(){
-  if(_driveSilentReconnect||!FS.needsReconnect()) return false;
+  const needs=FS.needsReconnect(),expiring=FS.isExpiringSoon();
+  if(_driveSilentReconnect||(!needs&&!expiring)) return false;
+  if(!needs){
+    if(Date.now()-_proactiveDriveAttemptAt<600000) return false;
+    _proactiveDriveAttemptAt=Date.now();
+  }
   _driveSilentReconnect=FS.connect({silent:true})
     .then(result=>{
       if(result?.ok){
