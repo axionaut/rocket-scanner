@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-21 10:46 IST'; // release build date (IST)
-const APP_VERSION=1769;
+const BUILD_TS='2026-11-21 13:09 IST'; // release build date (IST)
+const APP_VERSION=1770;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -590,8 +590,14 @@ const FS = (() => {
   const LOCAL_KEY = 'rocket_brain';
   const LOCAL_HANDLE_KEY = 'rocket_brain_dir_handle';
   const FILTER_MIRROR_KEY = 'filter_mirrors_v1';
+  const PORTABLE_RESET_PENDING = 'rs_portable_reset_pending_v1';
   let _filterMirrors = null;
   let _filterMirrorWrite = Promise.resolve();
+  let _portableFilters = {};
+  let _portableRecoveryError = false;
+  let _portableReady = false;
+  let _portableTimer = null;
+  let _portableSignature = '';
   let _saveTimer = null;
   let _brain = {};
   let _brainLoaded = false;
@@ -695,8 +701,35 @@ const FS = (() => {
       _filterMirrors=mirrors||{};
     }catch(e){console.warn('Saved filter recovery could not be read; filter saving stays locked.',e);}
     updateFolderUI();
-    const localBrain=await readLocalBrain();
+    let recoveryState=null;
+    const resetPending=Number(localStorage.getItem(PORTABLE_RESET_PENDING))||0;
+    if(resetPending) await flushPortableReset();
+    const stillPending=!!Number(localStorage.getItem(PORTABLE_RESET_PENDING));
+    try{
+      const r=await fetch(KITE_HELPER+'/api/recovery/browser-settings',{cache:'no-store',signal:AbortSignal.timeout(3000)});
+      if(r.status===503){_portableRecoveryError=true;_filterMirrors=null;throw new Error('Saved browser recovery is unreadable');}
+      if(r.ok&&!stillPending)recoveryState=(await r.json())?.state||null;
+    }catch(e){console.warn('Portable browser settings unavailable',e);}
+    let localBrain=await readLocalBrain();
+    // A new browser has no IndexedDB. The helper can recover the brain included
+    // in a downloaded folder before defaults are applied or saved.
+    if(!localBrain&&!stillPending&&!recoveryState?.resetAt){
+      let receivedBrain=false;
+      try{
+        const r=await fetch(KITE_HELPER+'/api/inputs/file?name=rocket_brain.json',{cache:'no-store',signal:AbortSignal.timeout(10000)});
+        if(r.ok){
+          receivedBrain=true;
+          const saved=await r.json();
+          if(!saved||typeof saved!=='object'||Array.isArray(saved))throw new Error('Invalid local recovery brain');
+          localBrain=saved;
+        }
+      }catch(e){
+        if(receivedBrain){_portableRecoveryError=true;_filterMirrors=null;}
+        console.warn('Local recovery brain unavailable',e);
+      }
+    }
     let bestBrain=localBrain;
+    if(recoveryState){_portableFilters=recoveryState.filters||{};bestBrain=mergeCumulativeBrain(bestBrain,recoveryState.settings);}
     const syncDriveBrain=async()=>{
       if(!isConnected()&&localStorage.getItem(PROVIDER_STORE)==='drive'){
         try{if(typeof setMsg==='function'&&document.getElementById('ldSt')?.classList.contains('on'))setMsg('Connecting Google Drive...');}catch(e){}
@@ -704,7 +737,7 @@ const FS = (() => {
           const restored=await connect({silent:true});
           if(restored?.ok){
             updateFolderUI();
-            bestBrain=mergeCumulativeBrain(localBrain,restored.brain);
+            bestBrain=mergeCumulativeBrain(bestBrain,restored.brain);
             return bestBrain;
           }
         }catch(e){console.warn('Silent Drive reconnect failed',e);}
@@ -714,14 +747,16 @@ const FS = (() => {
       try{if(typeof setMsg==='function'&&document.getElementById('ldSt')?.classList.contains('on'))setMsg('Loading cloud settings from Google Drive...');}catch(e){}
       try{
         const brain=await read({timeoutMs:8000});
-        bestBrain=mergeCumulativeBrain(localBrain,brain);
+        bestBrain=mergeCumulativeBrain(bestBrain,brain);
         return bestBrain;
       }catch(e){console.warn('Drive startup read failed',e);return bestBrain;}
     };
-    return await withTimeout(syncDriveBrain(),10000,()=>{
+    const restored=await withTimeout(syncDriveBrain(),10000,()=>{
       console.warn('Startup Drive sync timed out after 10s; continuing with local cache.');
       return bestBrain;
     });
+    _portableReady=true;
+    return restored;
   }
 
   async function connect(opts={}){
@@ -1001,7 +1036,49 @@ const FS = (() => {
     if(raw!==null&&(!saved||typeof saved!=='object'||Array.isArray(saved))) throw new Error('Invalid saved filters');
     const recovery=_filterMirrors[key];
     if(Object.hasOwn(_filterMirrors,key)&&(!recovery||typeof recovery!=='object'||Array.isArray(recovery)||!Number.isFinite(Number(recovery._updatedAt)))) throw new Error('Invalid saved filter recovery');
-    return recovery&&Number(recovery._updatedAt)>=Number(saved?._updatedAt||0)?recovery:(saved||{});
+    let best=recovery&&Number(recovery._updatedAt)>=Number(saved?._updatedAt||0)?recovery:(saved||{});
+    const portable=_portableFilters[key];
+    if(portable&&Number(portable._updatedAt)>Number(best._updatedAt||0)) best=portable;
+    return best;
+  }
+  async function flushPortableReset(){
+    const resetAt=Number(localStorage.getItem(PORTABLE_RESET_PENDING))||0;
+    if(!resetAt)return true;
+    try{
+      const r=await fetch(KITE_HELPER+'/api/recovery/browser-settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({resetAt}),signal:AbortSignal.timeout(5000)});
+      if(!r.ok)throw new Error('Local recovery reset failed: '+r.status);
+      if(Number(localStorage.getItem(PORTABLE_RESET_PENDING))===resetAt)localStorage.removeItem(PORTABLE_RESET_PENDING);
+      return true;
+    }catch(e){console.warn('Portable recovery reset is pending',e);return false;}
+  }
+  function queuePortableSettings(){
+    if(!_portableReady||!_filterMirrors||_portableRecoveryError)return;
+    if(Number(localStorage.getItem(PORTABLE_RESET_PENDING))){void flushPortableReset().then(ok=>{if(ok)queuePortableSettings();});return;}
+    try{
+      const settings={};
+      [SURV_RULE_STORE,'rs_goal_v1',TRADE_INPUTS_STORE,USER_SETTINGS_META_STORE].forEach(key=>{
+        if(Object.hasOwn(_brain,key))settings[key]=_brain[key];
+      });
+      const filters={};
+      [SCANNER_STORE,SHARED_FILTER_STORE].forEach(key=>{
+        const state=getFilterMirror(key);
+        if(Number.isFinite(Number(state._updatedAt))&&Number(state._updatedAt)>0)filters[key]=state;
+      });
+      if(!Object.keys(settings).length&&!Object.keys(filters).length)return;
+      const comparable=Object.fromEntries(Object.entries(filters).map(([key,value])=>{
+        const {_updatedAt,...rest}=value;return [key,rest];
+      }));
+      const signature=JSON.stringify({settings,filters:comparable});
+      if(signature===_portableSignature)return;
+      clearTimeout(_portableTimer);
+      _portableTimer=setTimeout(async()=>{
+        try{
+          const r=await fetch(KITE_HELPER+'/api/recovery/browser-settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({version:1,settings,filters}),signal:AbortSignal.timeout(5000)});
+          if(!r.ok)throw new Error('Local recovery save failed: '+r.status);
+          _portableSignature=signature;
+        }catch(e){console.warn('Portable browser settings were not saved',e);}
+      },800);
+    }catch(e){console.warn('Portable browser settings could not be read; recovery file preserved',e);}
   }
   function persistFilterMirrors(){
     const snapshot=JSON.parse(JSON.stringify(_filterMirrors));
@@ -1027,6 +1104,7 @@ const FS = (() => {
         persistFilterMirrors();
       }
     }
+    queuePortableSettings();
   }
   function removeFilterMirror(key){
     localStorage.removeItem(key);
@@ -1177,6 +1255,7 @@ const FS = (() => {
     const meta={...((_brain[USER_SETTINGS_META_STORE]&&typeof _brain[USER_SETTINGS_META_STORE]==='object')?_brain[USER_SETTINGS_META_STORE]:{})};
     meta[key]=Date.now();
     setMultiple({[key]:value,[USER_SETTINGS_META_STORE]:meta});
+    queuePortableSettings();
   }
 
   function get(key){ return _brain[key]??null; }
@@ -1186,6 +1265,7 @@ const FS = (() => {
     const cumulative=mergeCumulativeBrain(_brain,raw);
     _brain=pruneBrainForStorage(cumulative);
     _brainLoaded=true;
+    queuePortableSettings();
     writeLocalBrain(_brain).catch(e=>console.warn('Local brain mirror failed after load',e));
     // Seamless one-time migration: old/full brains still load, then the next cloud copy is pruned automatically.
     if(hadDropped&&isConnected()) write(_brain).catch(e=>console.warn('Cloud brain migration save failed',e));
@@ -1217,6 +1297,10 @@ const FS = (() => {
   }
   function getBrain(){ return _brain; }
   function reset(preserved={}){
+    clearTimeout(_portableTimer);
+    _portableFilters={};_portableSignature='';
+    localStorage.setItem(PORTABLE_RESET_PENDING,String(Date.now()));
+    void flushPortableReset().then(ok=>{if(!ok)showToast('Brain reset locally; its recovery copy will clear when the helper reconnects.',7000,true);});
     _filterMirrors={};
     persistFilterMirrors();
     _brain=pruneBrainForStorage(preserved||{});
@@ -1230,7 +1314,7 @@ const FS = (() => {
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
   function getActiveLocalDirectoryHandle(){ return _localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,isExpiringSoon,getHint:savedHint,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,setUserSetting,get,getFilterMirror,setFilterMirror,removeFilterMirror,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,isExpiringSoon,getHint:savedHint,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,setUserSetting,get,getFilterMirror,setFilterMirror,removeFilterMirror,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle,queuePortableSettings};
 })();
 
 function updateFolderUI(){
@@ -13412,6 +13496,7 @@ async function detectKiteApi(force,options={}){
     const next=r.ok?await r.json():null;
     if(!next?.ok) throw new Error('Kite status unavailable');
     KITE_API=next;LAST_KITE_STATUS_AT=Date.now();
+    FS.queuePortableSettings();
     try{document.querySelector('[data-lna-banner]')?.remove();}catch(e){}
     if(KITE_API.mode==='connect') KITE_CONNECT_SEEN=true;
     if(KITE_API.hasToken&&KITE_API.tokenValid===true&&!KITE_API.needsLogin){

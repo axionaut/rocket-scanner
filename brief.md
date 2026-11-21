@@ -1,10 +1,11 @@
-# Active Task: Deployed v1769 / Operational
+# Active Task: Deployed v1770 / Operational
 
-Rocket Scanner v1769 deployed at 2026-11-21 10:46 IST. System operational and in sync with origin/master.
+Rocket Scanner v1770 deployed at 2026-11-21 13:09 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1770:** Make Rocket Scanner portable with protected recovery settings
 - **v1769:** Add startup failsafe watchdog, IndexedDB/FileHandle timeouts, and Chrome helper access banner
 - **v1768:** Fix Drive body/IndexedDB startup stalls, weekend outage loop, and PNA CORS
 - **v1767:** Persist Google Drive login_hint and add proactive token renewal
