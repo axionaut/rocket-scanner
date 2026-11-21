@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-21 14:52 IST'; // release build date (IST)
-const APP_VERSION=1773;
+const BUILD_TS='2026-11-21 16:16 IST'; // release build date (IST)
+const APP_VERSION=1774;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -946,7 +946,7 @@ const FS = (() => {
     return {file,lastModified,path:'Google Drive/'+fileName};
   }
 
-  async function uploadFile(name,content,mimeType='application/octet-stream'){
+  async function uploadFile(name,content,mimeType='application/octet-stream',options={}){
     const existing=await findFile(name);
     const endpoint=DRIVE_UPLOAD+(existing?'/'+encodeURIComponent(existing.id):'')+'?uploadType=resumable&fields=id,name,modifiedTime';
     const metadata=existing?{name}:{name,parents:['appDataFolder']};
@@ -958,7 +958,10 @@ const FS = (() => {
     const location=begin.headers.get('Location');
     if(!location) throw new Error('Google Drive did not provide an upload location.');
     const blob=content instanceof Blob?content:new Blob([content],{type:mimeType});
-    const done=await request(location,{method:'PUT',headers:{'Content-Type':mimeType},body:blob});
+    // A full brain can be tens of megabytes. Allow time for a slow connection,
+    // especially while Drive for desktop is uploading the Apps folder.
+    const timeoutMs=options.largeBrain?Math.min(300000,Math.max(30000,15000+Math.ceil(blob.size/(192*1024))*1000)):15000;
+    const done=await request(location,{method:'PUT',headers:{'Content-Type':mimeType},body:blob,timeoutMs});
     try{
       const meta=await done.json();
       if(meta?.name&&_fileCache) _fileCache.set(meta.name,meta);
@@ -995,15 +998,16 @@ const FS = (() => {
     return counts.reduce((s,v)=>s+v,0);
   }
 
-  async function write(data){
+  async function write(data,options={}){
     if(_saveTimer){clearTimeout(_saveTimer);_saveTimer=null;}
     const cleaned=pruneBrainForStorage(data);
     if(data===_brain) _brain=cleaned;
     queuePortableBrain();
     const localOk=await writeLocalBrain(cleaned);
-    if(!isConnected()) return localOk;
-    try{return await uploadFile(BRAIN_FILE,JSON.stringify(cleaned),'application/json');}
-    catch(e){console.warn('FS.write failed',e);return false;}
+    const result=(ok,cloudError=null)=>options.report?{ok,localOk,cloudError}:ok;
+    if(!isConnected()) return result(localOk);
+    try{return result(await uploadFile(BRAIN_FILE,JSON.stringify(cleaned),'application/json',{largeBrain:true}));}
+    catch(e){console.warn('FS.write failed',e);return result(false,e?.message||'Drive backup failed');}
   }
 
   function openLocalDb(){
@@ -1024,7 +1028,7 @@ const FS = (() => {
 
   async function writeIndexedBrain(data){
     if(!data||typeof data!=='object') return false;
-    return !!(await idbTx('readwrite',2500,(tx,done)=>{
+    return !!(await idbTx('readwrite',15000,(tx,done)=>{
       tx.objectStore(LOCAL_STORE).put({key:LOCAL_KEY,data,ts:Date.now()});
       tx.oncomplete=()=>done(true);
     }));
@@ -1438,9 +1442,14 @@ function queueHelperInputBackup(files){
 }
 function saveBrainInBackground(label='Brain saved'){
   idleTask(()=>{
-    FS.write(FS.getBrain())
-      .then(ok=>{if(!ok) showToast('Background brain save failed. Reconnect Drive and load again.',5000,true);})
-      .catch(e=>showToast('Background brain save failed: '+(e.message||e),5000,true));
+    FS.write(FS.getBrain(),{report:true})
+      .then(result=>{
+        if(result.ok)return;
+        if(result.localOk) showToast('Brain saved on this computer, but the app\'s Drive backup failed. Drive for desktop sync is separate.',7000,true);
+        else if(result.cloudError) showToast('Brain could not be saved on this computer or to the app\'s Drive backup. Keep this page open and retry.',7000,true);
+        else showToast('Brain could not be saved on this computer. Keep this page open and check browser storage.',7000,true);
+      })
+      .catch(e=>showToast('Could not verify the brain save. Keep this page open and retry: '+(e.message||e),7000,true));
   },1800);
 }
 function renderTradingDashboardNow(){

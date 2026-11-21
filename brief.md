@@ -1,10 +1,11 @@
-# Active Task: Deployed v1773 / Operational
+# Active Task: Deployed v1774 / Operational
 
-Rocket Scanner v1773 deployed at 2026-11-21 14:52 IST. System operational and in sync with origin/master.
+Rocket Scanner v1774 deployed at 2026-11-21 16:16 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1774:** Fix brain backup timeout and report local save status
 - **v1773:** Move scanner temporary staging outside synced folders
 - **v1772:** Honor recovered allocation settings
 - **v1771:** Back up learned browser state for portable recovery
