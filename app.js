@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-21 13:09 IST'; // release build date (IST)
-const APP_VERSION=1770;
+const BUILD_TS='2026-11-21 13:28 IST'; // release build date (IST)
+const APP_VERSION=1771;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -598,6 +598,9 @@ const FS = (() => {
   let _portableReady = false;
   let _portableTimer = null;
   let _portableSignature = '';
+  let _portableBrainTimer = null;
+  let _portableBrainBusy = false;
+  let _portableBrainAttemptAt = 0;
   let _saveTimer = null;
   let _brain = {};
   let _brainLoaded = false;
@@ -713,6 +716,20 @@ const FS = (() => {
     let localBrain=await readLocalBrain();
     // A new browser has no IndexedDB. The helper can recover the brain included
     // in a downloaded folder before defaults are applied or saved.
+    if(!localBrain&&!stillPending){
+      let receivedSnapshot=false;
+      try{
+        const r=await fetch(KITE_HELPER+'/api/recovery/brain',{cache:'no-store',signal:AbortSignal.timeout(10000)});
+        if(r.ok){
+          receivedSnapshot=true;
+          const saved=await r.json();
+          if(saved?.snapshot===null){}
+          else if(saved?.brain&&typeof saved.brain==='object'&&!Array.isArray(saved.brain)&&Number.isFinite(Number(saved.capturedAt))){
+            if(Number(saved.capturedAt)>Number(recoveryState?.resetAt||0))localBrain=saved.brain;
+          }else throw new Error('Invalid portable recovery brain');
+        }
+      }catch(e){if(receivedSnapshot){_portableRecoveryError=true;_filterMirrors=null;}console.warn('Portable recovery brain unavailable',e);}
+    }
     if(!localBrain&&!stillPending&&!recoveryState?.resetAt){
       let receivedBrain=false;
       try{
@@ -982,6 +999,7 @@ const FS = (() => {
     if(_saveTimer){clearTimeout(_saveTimer);_saveTimer=null;}
     const cleaned=pruneBrainForStorage(data);
     if(data===_brain) _brain=cleaned;
+    queuePortableBrain();
     const localOk=await writeLocalBrain(cleaned);
     if(!isConnected()) return localOk;
     try{return await uploadFile(BRAIN_FILE,JSON.stringify(cleaned),'application/json');}
@@ -1079,6 +1097,22 @@ const FS = (() => {
         }catch(e){console.warn('Portable browser settings were not saved',e);}
       },800);
     }catch(e){console.warn('Portable browser settings could not be read; recovery file preserved',e);}
+  }
+  function queuePortableBrain(){
+    if(!_portableReady||!_brainLoaded||_portableRecoveryError||_portableBrainBusy||Number(localStorage.getItem(PORTABLE_RESET_PENDING)))return;
+    if(Date.now()-_portableBrainAttemptAt<30*60*1000)return;
+    if(typeof CompressionStream!=='function')return;
+    _portableBrainBusy=true;_portableBrainAttemptAt=Date.now();
+    _portableBrainTimer=setTimeout(async()=>{
+      try{
+        const payload=JSON.stringify({version:1,capturedAt:Date.now(),brain:pruneBrainForStorage(_brain)});
+        const compressed=new Blob([payload],{type:'application/json'}).stream().pipeThrough(new CompressionStream('gzip'));
+        const blob=await new Response(compressed).blob();
+        const r=await fetch(KITE_HELPER+'/api/recovery/brain',{method:'POST',headers:{'content-type':'application/gzip'},body:blob,signal:AbortSignal.timeout(30000)});
+        if(!r.ok)throw new Error('Local recovery save failed: '+r.status);
+      }catch(e){_portableBrainAttemptAt=Date.now()-25*60*1000;console.warn('Portable recovery brain was not saved',e);}
+      finally{_portableBrainBusy=false;}
+    },2000);
   }
   function persistFilterMirrors(){
     const snapshot=JSON.parse(JSON.stringify(_filterMirrors));
@@ -1266,6 +1300,7 @@ const FS = (() => {
     _brain=pruneBrainForStorage(cumulative);
     _brainLoaded=true;
     queuePortableSettings();
+    queuePortableBrain();
     writeLocalBrain(_brain).catch(e=>console.warn('Local brain mirror failed after load',e));
     // Seamless one-time migration: old/full brains still load, then the next cloud copy is pruned automatically.
     if(hadDropped&&isConnected()) write(_brain).catch(e=>console.warn('Cloud brain migration save failed',e));
@@ -1298,6 +1333,7 @@ const FS = (() => {
   function getBrain(){ return _brain; }
   function reset(preserved={}){
     clearTimeout(_portableTimer);
+    clearTimeout(_portableBrainTimer);_portableBrainBusy=false;_portableBrainAttemptAt=0;
     _portableFilters={};_portableSignature='';
     localStorage.setItem(PORTABLE_RESET_PENDING,String(Date.now()));
     void flushPortableReset().then(ok=>{if(!ok)showToast('Brain reset locally; its recovery copy will clear when the helper reconnects.',7000,true);});
