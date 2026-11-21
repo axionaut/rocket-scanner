@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-21 10:06 IST'; // release build date (IST)
-const APP_VERSION=1767;
+const BUILD_TS='2026-11-21 10:17 IST'; // release build date (IST)
+const APP_VERSION=1768;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -682,7 +682,7 @@ const FS = (() => {
     if(!isConnected()) return localBrain;
     if(!savedHint()) void rememberDriveAccountHint();
     try{
-      const brain=await read();
+      const brain=await read({timeoutMs:10000});
       return mergeCumulativeBrain(localBrain,brain);
     }catch(e){console.warn('Drive startup read failed',e);return localBrain;}
   }
@@ -729,40 +729,49 @@ const FS = (() => {
     return localStorage.getItem(PROVIDER_STORE)==='drive'&&!isConnected();
   }
 
-  async function request(url,options={}){
+  async function executeRequest(url,options={},bodyReader=null){
     if(!isConnected()) throw new Error('Google Drive is not connected. Click Connect Drive again.');
     const {timeoutMs=15000,...fetchOpts}=options;
     const headers=new Headers(fetchOpts.headers||{});
     headers.set('Authorization','Bearer '+_accessToken);
     const ctl=fetchOpts.signal?null:new AbortController();
     const timer=ctl&&timeoutMs>0?setTimeout(()=>ctl.abort(),timeoutMs):null;
-    let response;
     try{
-      response=await fetch(url,{...fetchOpts,headers,...(ctl?{signal:ctl.signal}:{})});
+      const response=await fetch(url,{...fetchOpts,headers,...(ctl?{signal:ctl.signal}:{})});
+      if(response.status===401){
+        clearSession();
+        throw new Error('Google Drive authorization expired. Click Connect Drive again.');
+      }
+      if(!response.ok) throw new Error('Google Drive request failed ('+response.status+').');
+      return bodyReader?await bodyReader(response):response;
     }catch(e){
       if(e?.name==='AbortError') throw new Error('Google Drive request timed out');
       throw e;
     }finally{if(timer)clearTimeout(timer);}
-    if(response.status===401){
-      clearSession();
-      throw new Error('Google Drive authorization expired. Click Connect Drive again.');
-    }
-    if(!response.ok) throw new Error('Google Drive request failed ('+response.status+').');
-    return response;
+  }
+  async function request(url,options={}){
+    return executeRequest(url,options,null);
+  }
+  async function requestJson(url,options={}){
+    return executeRequest(url,options,r=>r.json());
   }
   function queryName(name){ return String(name).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
-  async function listAppDataFiles(force=false){
+  async function listAppDataFiles(force=false,options={}){
     if(_fileCache&&!force) return _fileCache;
     if(_listFilesPromise&&!force) return _listFilesPromise;
     const job=(async()=>{
       const files=[];
+      const totalMs=Math.max(3000,Number(options.timeoutMs)||12000);
+      const deadline=Date.now()+totalMs;
       let pageToken='',pages=0;
       do{
+        const remaining=deadline-Date.now();
+        if(remaining<=0) throw new Error('Google Drive file listing timed out');
         const url=DRIVE_API+'?spaces=appDataFolder&pageSize=100&fields=nextPageToken,files(id,name,modifiedTime,mimeType,size)&q='+encodeURIComponent('trashed=false')+(pageToken?'&pageToken='+encodeURIComponent(pageToken):'');
-        const data=await (await request(url,{timeoutMs:12000})).json();
+        const data=await requestJson(url,{timeoutMs:Math.min(8000,Math.max(1500,remaining))});
         (data.files||[]).forEach(f=>files.push(f));
         pageToken=data.nextPageToken||'';
-        if(++pages>=25) break;
+        if(++pages>=10) break;
       }while(pageToken);
       _fileCache=new Map();
       files.forEach(f=>{
@@ -774,38 +783,46 @@ const FS = (() => {
     _listFilesPromise=job;
     try{return await job;}finally{if(_listFilesPromise===job)_listFilesPromise=null;}
   }
-  async function findFile(name){
-    const cache=await listAppDataFiles();
-    if(cache.has(name)) return cache.get(name);
-    // Canonical reads should also find files saved with minor name variations
-    // such as ALL_NSE.csv, ALL-NSE.csv or browser '(1)' suffixes.
-    const targetCanonical=canonicalInputName(name);
-    if(targetCanonical===name){
-      let best=null;
-      for(const meta of cache.values()){
-        if(canonicalInputName(meta.name)!==name) continue;
-        if(!best||String(meta.modifiedTime||'')>String(best.modifiedTime||'')) best=meta;
-      }
-      if(best){
-        cache.set(name,best);
-        return best;
+  async function findFile(name,options={}){
+    if(_fileCache?.has(name)) return _fileCache.get(name);
+    if(!options.direct){
+      const cache=await listAppDataFiles(false,options);
+      if(cache.has(name)) return cache.get(name);
+      // Canonical reads should also find files saved with minor name variations
+      // such as ALL_NSE.csv, ALL-NSE.csv or browser '(1)' suffixes.
+      const targetCanonical=canonicalInputName(name);
+      if(targetCanonical===name){
+        let best=null;
+        for(const meta of cache.values()){
+          if(canonicalInputName(meta.name)!==name) continue;
+          if(!best||String(meta.modifiedTime||'')>String(best.modifiedTime||'')) best=meta;
+        }
+        if(best){
+          cache.set(name,best);
+          return best;
+        }
       }
     }
     const q=`name='${queryName(name)}' and trashed=false`;
-    const url=DRIVE_API+'?spaces=appDataFolder&pageSize=1&fields=files(id,name,modifiedTime,mimeType)&q='+encodeURIComponent(q);
-    const data=await (await request(url)).json();
+    const url=DRIVE_API+'?spaces=appDataFolder&pageSize=5&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime,mimeType)&q='+encodeURIComponent(q);
+    const data=await requestJson(url,{timeoutMs:Math.min(10000,Number(options.timeoutMs)||10000)});
     const file=data.files?.[0]||null;
-    if(file) cache.set(name,file);
+    if(file&&_fileCache) _fileCache.set(name,file);
     return file;
   }
-  async function readBlob(name){
-    const meta=await findFile(name);
+  async function readBlob(name,options={}){
+    const timeoutMs=Number(options.timeoutMs)||30000;
+    const deadline=Date.now()+timeoutMs;
+    const meta=await findFile(name,{...options,timeoutMs:Math.min(10000,timeoutMs)});
     if(!meta) return null;
-    const response=await request(DRIVE_API+'/'+encodeURIComponent(meta.id)+'?alt=media',{timeoutMs:30000});
-    return {blob:await response.blob(),meta};
+    const remaining=Math.max(Math.min(2000,timeoutMs),deadline-Date.now());
+    return executeRequest(DRIVE_API+'/'+encodeURIComponent(meta.id)+'?alt=media',{timeoutMs:remaining},async response=>{
+      const blob=await response.blob();
+      return {blob,meta};
+    });
   }
-  async function read(){
-    const hit=await readBlob(BRAIN_FILE);
+  async function read(options={}){
+    const hit=await readBlob(BRAIN_FILE,{direct:true,...options});
     if(!hit) return null;
     try{
       return JSON.parse(await hit.blob.text());
@@ -902,10 +919,16 @@ const FS = (() => {
   function openLocalDb(){
     return new Promise((resolve,reject)=>{
       if(!window.indexedDB){resolve(null);return;}
-      const req=indexedDB.open(LOCAL_DB,1);
-      req.onupgradeneeded=()=>{req.result.createObjectStore(LOCAL_STORE,{keyPath:'key'});};
-      req.onsuccess=()=>resolve(req.result);
-      req.onerror=()=>reject(req.error);
+      let settled=false;
+      const done=(fn,val)=>{if(settled)return;settled=true;clearTimeout(timer);fn(val);};
+      const timer=setTimeout(()=>done(resolve,null),3000);
+      try{
+        const req=indexedDB.open(LOCAL_DB,1);
+        req.onupgradeneeded=()=>{req.result.createObjectStore(LOCAL_STORE,{keyPath:'key'});};
+        req.onsuccess=()=>{if(settled){try{req.result.close();}catch(e){}return;}done(resolve,req.result);};
+        req.onerror=()=>done(reject,req.error);
+        req.onblocked=()=>{console.warn('IndexedDB open blocked; continuing without local store');done(resolve,null);};
+      }catch(e){done(reject,e);}
     });
   }
 
@@ -1158,10 +1181,10 @@ const FS = (() => {
     load(brain||{});
     return brain;
   }
-  async function refreshCloudIndex(){
+  async function refreshCloudIndex(force=true){
     if(!isConnected()) return null;
-    _fileCache=null;
-    return await listAppDataFiles(true);
+    if(force) _fileCache=null;
+    return await listAppDataFiles(force);
   }
   async function verifyConnection(){
     if(!isConnected()) return false;
@@ -1345,7 +1368,7 @@ async function connectCloudStorageImpl(opts={}){
   }
   setMsg('Loading latest Drive inputs...');
   try{
-    await FS.refreshCloudIndex?.();
+    await FS.refreshCloudIndex?.(false);
     const hydratedCount=await hydrateSessionCSVsFromPreferredInputs('Drive reconnect');
     try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('Drive reconnect NSE enrichment failed',e);}
     if(hydratedCount||Object.keys(FS.getBrain()||{}).length) saveBrainInBackground('Cloud brain saved');
