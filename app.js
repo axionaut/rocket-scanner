@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-21 10:17 IST'; // release build date (IST)
-const APP_VERSION=1768;
+const BUILD_TS='2026-11-21 10:46 IST'; // release build date (IST)
+const APP_VERSION=1769;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -660,8 +660,34 @@ const FS = (() => {
     return loaded;
   }
 
+  function withTimeout(promise,ms,fallbackVal){
+    let timer=null;
+    const timeout=new Promise(resolve=>{
+      timer=setTimeout(()=>resolve(typeof fallbackVal==='function'?fallbackVal():fallbackVal),ms);
+    });
+    return Promise.race([
+      Promise.resolve(promise).finally(()=>{if(timer)clearTimeout(timer);}),
+      timeout
+    ]);
+  }
+  async function idbTx(mode,timeoutMs,runner){
+    const db=await openLocalDb();
+    if(!db) return null;
+    return new Promise(resolve=>{
+      let settled=false;
+      const done=val=>{if(settled)return;settled=true;clearTimeout(timer);try{db.close();}catch(e){}resolve(val);};
+      const timer=setTimeout(()=>done(null),timeoutMs||2500);
+      try{
+        const tx=db.transaction(LOCAL_STORE,mode);
+        tx.onabort=()=>done(null);
+        tx.onerror=()=>{console.warn('IndexedDB transaction failed',tx.error);done(null);};
+        runner(tx,done);
+      }catch(e){console.warn('IndexedDB transaction error',e);done(null);}
+    });
+  }
   async function init(){
     restoreSession();
+    try{if(typeof setMsg==='function'&&document.getElementById('ldSt')?.classList.contains('on'))setMsg('Restoring local cache...');}catch(e){}
     await restoreLocalDirectoryHandle();
     try{
       const mirrors=await getLocalStore(FILTER_MIRROR_KEY);
@@ -670,21 +696,32 @@ const FS = (() => {
     }catch(e){console.warn('Saved filter recovery could not be read; filter saving stays locked.',e);}
     updateFolderUI();
     const localBrain=await readLocalBrain();
-    if(!isConnected()&&localStorage.getItem(PROVIDER_STORE)==='drive'){
+    let bestBrain=localBrain;
+    const syncDriveBrain=async()=>{
+      if(!isConnected()&&localStorage.getItem(PROVIDER_STORE)==='drive'){
+        try{if(typeof setMsg==='function'&&document.getElementById('ldSt')?.classList.contains('on'))setMsg('Connecting Google Drive...');}catch(e){}
+        try{
+          const restored=await connect({silent:true});
+          if(restored?.ok){
+            updateFolderUI();
+            bestBrain=mergeCumulativeBrain(localBrain,restored.brain);
+            return bestBrain;
+          }
+        }catch(e){console.warn('Silent Drive reconnect failed',e);}
+      }
+      if(!isConnected()) return bestBrain;
+      if(!savedHint()) void rememberDriveAccountHint();
+      try{if(typeof setMsg==='function'&&document.getElementById('ldSt')?.classList.contains('on'))setMsg('Loading cloud settings from Google Drive...');}catch(e){}
       try{
-        const restored=await connect({silent:true});
-        if(restored?.ok){
-          updateFolderUI();
-          return mergeCumulativeBrain(localBrain,restored.brain);
-        }
-      }catch(e){console.warn('Silent Drive reconnect failed',e);}
-    }
-    if(!isConnected()) return localBrain;
-    if(!savedHint()) void rememberDriveAccountHint();
-    try{
-      const brain=await read({timeoutMs:10000});
-      return mergeCumulativeBrain(localBrain,brain);
-    }catch(e){console.warn('Drive startup read failed',e);return localBrain;}
+        const brain=await read({timeoutMs:8000});
+        bestBrain=mergeCumulativeBrain(localBrain,brain);
+        return bestBrain;
+      }catch(e){console.warn('Drive startup read failed',e);return bestBrain;}
+    };
+    return await withTimeout(syncDriveBrain(),10000,()=>{
+      console.warn('Startup Drive sync timed out after 10s; continuing with local cache.');
+      return bestBrain;
+    });
   }
 
   async function connect(opts={}){
@@ -934,37 +971,24 @@ const FS = (() => {
 
   async function writeIndexedBrain(data){
     if(!data||typeof data!=='object') return false;
-    const db=await openLocalDb();
-    if(!db) return false;
-    return new Promise(resolve=>{
-      const tx=db.transaction(LOCAL_STORE,'readwrite');
+    return !!(await idbTx('readwrite',2500,(tx,done)=>{
       tx.objectStore(LOCAL_STORE).put({key:LOCAL_KEY,data,ts:Date.now()});
-      tx.oncomplete=()=>{db.close();resolve(true);};
-      tx.onerror=()=>{console.warn('IndexedDB brain mirror failed',tx.error);db.close();resolve(false);};
-    });
+      tx.oncomplete=()=>done(true);
+    }));
   }
 
   async function putLocalStore(key, value){
-    const db=await openLocalDb();
-    if(!db) return false;
-    return new Promise(resolve=>{
-      const tx=db.transaction(LOCAL_STORE,'readwrite');
+    return !!(await idbTx('readwrite',2500,(tx,done)=>{
       tx.objectStore(LOCAL_STORE).put({key,value,ts:Date.now()});
-      tx.oncomplete=()=>{db.close();resolve(true);};
-      tx.onerror=()=>{console.warn('Local store write failed',tx.error);db.close();resolve(false);};
-    });
+      tx.oncomplete=()=>done(true);
+    }));
   }
 
   async function getLocalStore(key){
-    const db=await openLocalDb();
-    if(!db) return null;
-    return new Promise(resolve=>{
-      const tx=db.transaction(LOCAL_STORE,'readonly');
+    return idbTx('readonly',2500,(tx,done)=>{
       const req=tx.objectStore(LOCAL_STORE).get(key);
-      req.onsuccess=()=>resolve(req.result?.value??null);
-      req.onerror=()=>{console.warn('Local store read failed',req.error);resolve(null);};
-      tx.oncomplete=()=>db.close();
-      tx.onerror=()=>db.close();
+      req.onsuccess=()=>done(req.result?.value??null);
+      req.onerror=()=>{console.warn('Local store read failed',req.error);done(null);};
     });
   }
 
@@ -1013,27 +1037,18 @@ const FS = (() => {
   }
 
   async function readIndexedBrain(){
-    const db=await openLocalDb();
-    if(!db) return null;
-    return new Promise(resolve=>{
-      const tx=db.transaction(LOCAL_STORE,'readonly');
+    return idbTx('readonly',2500,(tx,done)=>{
       const req=tx.objectStore(LOCAL_STORE).get(LOCAL_KEY);
-      req.onsuccess=()=>resolve(req.result?.data||null);
-      req.onerror=()=>{console.warn('IndexedDB brain read failed',req.error);resolve(null);};
-      tx.oncomplete=()=>db.close();
-      tx.onerror=()=>db.close();
+      req.onsuccess=()=>done(req.result?.data||null);
+      req.onerror=()=>{console.warn('IndexedDB brain read failed',req.error);done(null);};
     });
   }
 
   async function deleteIndexedBrain(){
-    const db=await openLocalDb();
-    if(!db) return false;
-    return new Promise(resolve=>{
-      const tx=db.transaction(LOCAL_STORE,'readwrite');
+    return !!(await idbTx('readwrite',2500,(tx,done)=>{
       tx.objectStore(LOCAL_STORE).delete(LOCAL_KEY);
-      tx.oncomplete=()=>{db.close();resolve(true);};
-      tx.onerror=()=>{console.warn('IndexedDB brain delete failed',tx.error);db.close();resolve(false);};
-    });
+      tx.oncomplete=()=>done(true);
+    }));
   }
 
   async function writeLocalBrain(data){
@@ -1065,7 +1080,7 @@ const FS = (() => {
       const handle=await getLocalStore(LOCAL_HANDLE_KEY);
       if(!handle) return false;
       _localDirHandle=handle;
-      const granted=!_localDirHandle.queryPermission||await _localDirHandle.queryPermission({mode:'read'})==='granted';
+      const granted=!_localDirHandle.queryPermission||await withTimeout(_localDirHandle.queryPermission({mode:'read'}),2000,'prompt')==='granted';
       if(granted){
         updateFolderUI();
         return true;
@@ -13366,6 +13381,28 @@ async function refreshNseFundamentals(){
 }
 let KITE_LOGIN_PENDING=false,LAST_KITE_STATUS_AT=0,_startupHydrationPending=true;
 let _kiteAuthRefresh=null,_kiteReturnRefresh=null;
+async function requestLocalHelperAccess(){
+  const res=await detectKiteApi(true);
+  if(res){
+    showToast('<strong>Local helper connected.</strong> Loading local inputs...',3000);
+    await hydrateSessionCSVsFromPreferredInputs('Helper reconnect').catch(()=>{});
+    renderTradingDashboardNow();
+    return true;
+  }
+  showToast('Chrome blocked localhost:8787 from axionaut.github.io. Click the Site Settings icon left of the URL bar → Local network / Apps on device → Allow → Reload (or open http://localhost:8787/ directly).',9000,true);
+  return false;
+}
+function renderLocalHelperAccessBanner(){
+  if(KITE_API||location.protocol!=='https:'||typeof document==='undefined') return;
+  const bar=document.getElementById('infoBar');
+  if(!bar||bar.querySelector('[data-lna-banner]')) return;
+  const pill=document.createElement('span');
+  pill.className='info-pill pill-amber';
+  pill.dataset.lnaBanner='1';
+  pill.style.cssText='display:inline-flex;align-items:center;gap:8px;font-weight:700';
+  pill.innerHTML='⚠ Browser blocked local helper access (localhost:8787) <button class="btn" style="padding:2px 8px;font-size:12px" onclick="requestLocalHelperAccess()">Connect Helper</button> <a href="http://localhost:8787/" style="color:inherit;text-decoration:underline;font-weight:700">Open localhost:8787</a>';
+  bar.appendChild(pill);
+}
 async function detectKiteApi(force,options={}){
   let timer=null;
   try{
@@ -13375,6 +13412,7 @@ async function detectKiteApi(force,options={}){
     const next=r.ok?await r.json():null;
     if(!next?.ok) throw new Error('Kite status unavailable');
     KITE_API=next;LAST_KITE_STATUS_AT=Date.now();
+    try{document.querySelector('[data-lna-banner]')?.remove();}catch(e){}
     if(KITE_API.mode==='connect') KITE_CONNECT_SEEN=true;
     if(KITE_API.hasToken&&KITE_API.tokenValid===true&&!KITE_API.needsLogin){
       KITE_LOGIN_PENDING=false;KITE_TOKEN_PROMPTED=false;
@@ -13388,6 +13426,7 @@ async function detectKiteApi(force,options={}){
     try{renderTable();}catch(e){}
     if(KITE_API&&!_startupHydrationPending){try{loadIntradayInventory();}catch(e){}}
     try{maybePromptKiteToken();}catch(e){}
+    if(!KITE_API) try{renderLocalHelperAccessBanner();}catch(e){}
   }
   return KITE_API;
 }
@@ -17099,107 +17138,121 @@ async function processFilesImpl(files,sourceLabel,opts={}){
 // ══════════════════════════════════════════════════
 
 
-// ── Async app init: load brain file → hydrate all state → render ──
-async function initApp(){
-  // Establish helper state before any hydrated/folder input can start the refresh pipeline. This
-  // is a localhost probe capped at 1.5s; failure is explicitly tolerated by detectKiteApi().
-  const helperReady=detectKiteApi().catch(()=>{});
-  const startupAt=performance.now();
-  updateModeUI();
-  setLoading(true,'Loading latest cloud data...');
-  // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
-  let brain=null;
-  try{brain=await FS.init();}catch(e){console.warn('Local/cloud startup restore failed; continuing with helper',e);}
-  if(!brain&&!FS.hasFolder()){
-    console.log('INIT: Google Drive is not authorized; continuing with the local Kite helper.');
-    updateFolderUI();
-  }
-  if(brain){
-    FS.load(brain);
-    // Load NSE holidays first (compact calendar is intentionally persisted).
-    try{const hols=brain[NSE_HOLIDAYS_STORE];if(Array.isArray(hols)&&hols.length) NSE_HOLIDAYS=new Set(hols);}catch(e){}
-
-    // Step 1: Restore the compact Radar ranking cache for immediate display.
-    try{
-      const saved=brain[modeKey(ALL_STORE)];
-      if(saved?.schema===ALL_STORE_SCHEMA&&saved.data&&saved.data.length){
-        ALL=saved.data.map(s=>({...s,symbol:normSym(s.symbol)})).filter(s=>s.symbol);
-        RADAR.rockets=Number(saved.rockets)||0;
-        RADAR.continuationCount=Number(saved.continuationCount)||0;
-        FILT=[...ALL];
-        SELECTED=new Set(ALL.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
-        if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
-        console.log('INIT: restored',ALL.length,'ranked stocks from the Radar cache');
-      } else if(saved?.data?.length){
-        console.log('INIT: pre-Radar ranking cache found; waiting for a fresh upload instead of restoring engine-era rows.');
-      }
-    }catch(e){console.error('INIT step1 data failed:',e);}
-
-    // Step 2: Restore surveillance P&L correlation accumulator
-    try{const sc=brain[SURV_CORR_STORE];if(sc&&typeof sc==='object') SURV_CORR_ACC=sc;}catch(e){}
-
-    // Purge stale identity-column entries (one-time cleanup, no write-back needed)
-    {const _pNF=new Set(['scripcode','symbol','nse exclusive','status','series']);
-    Object.keys(SURV_CORR_ACC).forEach(k=>{const c=SURV_CORR_ACC[k]?.col||'';const hl=c.trim().toLowerCase();if(_pNF.has(hl)||/^filler/i.test(c.trim())) delete SURV_CORR_ACC[k];});}
-
-  } else {
-    if(FS.needsReconnect()){
-      console.log('INIT: Google Drive needs authorization — showing reconnect prompt.');
-      setTimeout(()=>{
-        const bar=document.getElementById('infoBar');
-        if(bar) bar.innerHTML=`<span class="info-pill pill-amber" style="cursor:pointer;font-weight:700" onclick="connectCloudStorage()" title="Click to authorize Google Drive and load the latest cloud brain">⚠ Google Drive needs authorization — click to connect</span>`;
-      },200);
-    } else {
-      console.log('INIT: no connected Google Drive brain found — connect Drive to load or save cloud state.');
-    }
-  }
-
-  // Restore configured surveillance rules, or seed the defaults for a fresh/reset brain,
-  // before REG1 ZIP hydration so surveillance monitoring is active on the first new scan.
-  loadSurvRules();
-
-  // Restore saved filters BEFORE hydration: hydration renders, and rendering saves filter
-  // state, so reading them back afterwards would persist blank inputs over the real ones.
-  try{loadFilterState();}catch(e){console.error('INIT loadFilterState failed:',e);}
-
-  // Both restores must finish before inputs can score or persist settings.
-  await helperReady;
-  console.info('Startup restore ms:',Math.round(performance.now()-startupAt));
-  // The local Kite helper owns current inputs; Drive is a backup only.
-  try{await hydrateSessionCSVsFromPreferredInputs('INIT');}catch(e){console.warn('INIT: input hydration failed',e);}
-
-  // Rankings render first; performance analytics are scheduled below as an idle task.
+function finishStartupUi(startupAt){
+  if(finishStartupUi.done) return;
+  finishStartupUi.done=true;
   try{const pe=document.getElementById('perfContent');if(pe&&!PERF_RENDERED)pe.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:38px;margin-bottom:14px">📈</div><div style="font-size:17px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings load first; trade analytics continue automatically.</div></div>`;}catch(e){}
-
-  // Step 3: Render stats without blocking on Performance analytics.
   try{if(ALL.length) renderStats();}catch(e){console.error('INIT step3 renderStats failed:',e);}
-
-  // Step 4: Render methodology
   try{if(isMainTabActive(1)) renderMethodology(); else METHODOLOGY_DIRTY=true;}catch(e){console.error('INIT step4 renderMethodology failed:',e);}
-
-  // Step 5: Re-apply filter state now that the tradebook can supply the learned Max Alloc.
   try{loadFilterState();}catch(e){console.error('INIT step5 loadFilterState failed:',e);}
-
-  // Step 6: Show header + dash before applyFilters so renderTable works into a visible element
   try{
     document.getElementById('hdrR').style.display='flex';
     document.getElementById('dash').style.display='block';
     document.getElementById('noDataBanner').style.display=ALL.length?'none':'flex';
   }catch(e){console.error('INIT step6 visibility failed:',e);}
-
-  // Step 7: Apply filters and render table — runs once, cleanly, with all filters restored
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
+  try{renderLocalHelperAccessBanner();}catch(e){}
   setLoading(false);
   console.info('Startup ready ms:',Math.round(performance.now()-startupAt));
   schedulePerformanceRender();
   _startupHydrationPending=false;
   if(KITE_API){try{loadIntradayInventory();}catch(e){}}
-  // The helper hydrates on the refresh beat; nothing watches a folder handle any more.
   startStreamRefresh();
+}
+// ── Async app init: load brain file → hydrate all state → render ──
+async function initApp(){
+  // Establish helper state before any hydrated/folder input can start the refresh pipeline.
+  const helperReady=detectKiteApi().catch(()=>{});
+  const startupAt=performance.now();
+  const startupWatchdog=setTimeout(()=>{
+    if(!finishStartupUi.done){
+      console.warn('Startup watchdog unlocked dashboard after 22s');
+      finishStartupUi(startupAt);
+      showToast('Startup took longer than expected; showing cached dashboard while background sync finishes.',5000,true);
+    }
+  },22000);
+  try{
+    updateModeUI();
+    setLoading(true,'Restoring local cache...');
+    // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
+    let brain=null;
+    try{brain=await FS.init();}catch(e){console.warn('Local/cloud startup restore failed; continuing with helper',e);}
+    if(!brain&&!FS.hasFolder()){
+      console.log('INIT: Google Drive is not authorized; continuing with the local Kite helper.');
+      updateFolderUI();
+    }
+    if(brain){
+      FS.load(brain);
+      // Load NSE holidays first (compact calendar is intentionally persisted).
+      try{const hols=brain[NSE_HOLIDAYS_STORE];if(Array.isArray(hols)&&hols.length) NSE_HOLIDAYS=new Set(hols);}catch(e){}
+
+      // Step 1: Restore the compact Radar ranking cache for immediate display.
+      try{
+        const saved=brain[modeKey(ALL_STORE)];
+        if(saved?.schema===ALL_STORE_SCHEMA&&saved.data&&saved.data.length){
+          ALL=saved.data.map(s=>({...s,symbol:normSym(s.symbol)})).filter(s=>s.symbol);
+          RADAR.rockets=Number(saved.rockets)||0;
+          RADAR.continuationCount=Number(saved.continuationCount)||0;
+          FILT=[...ALL];
+          SELECTED=new Set(ALL.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
+          if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
+          console.log('INIT: restored',ALL.length,'ranked stocks from the Radar cache');
+        } else if(saved?.data?.length){
+          console.log('INIT: pre-Radar ranking cache found; waiting for a fresh upload instead of restoring engine-era rows.');
+        }
+      }catch(e){console.error('INIT step1 data failed:',e);}
+
+      // Step 2: Restore surveillance P&L correlation accumulator
+      try{const sc=brain[SURV_CORR_STORE];if(sc&&typeof sc==='object') SURV_CORR_ACC=sc;}catch(e){}
+
+      // Purge stale identity-column entries (one-time cleanup, no write-back needed)
+      {const _pNF=new Set(['scripcode','symbol','nse exclusive','status','series']);
+      Object.keys(SURV_CORR_ACC).forEach(k=>{const c=SURV_CORR_ACC[k]?.col||'';const hl=c.trim().toLowerCase();if(_pNF.has(hl)||/^filler/i.test(c.trim())) delete SURV_CORR_ACC[k];});}
+
+    } else {
+      if(FS.needsReconnect()){
+        console.log('INIT: Google Drive needs authorization — showing reconnect prompt.');
+        setTimeout(()=>{
+          const bar=document.getElementById('infoBar');
+          if(bar&&!bar.querySelector('[data-drive-reconnect]')){
+            const pill=document.createElement('span');
+            pill.className='info-pill pill-amber';
+            pill.dataset.driveReconnect='1';
+            pill.style.cssText='cursor:pointer;font-weight:700';
+            pill.title='Click to authorize Google Drive and load the latest cloud brain';
+            pill.textContent='⚠ Google Drive needs authorization — click to connect';
+            pill.onclick=()=>connectCloudStorage();
+            bar.appendChild(pill);
+          }
+        },200);
+      } else {
+        console.log('INIT: no connected Google Drive brain found — connect Drive to load or save cloud state.');
+      }
+    }
+
+    // Restore configured surveillance rules, or seed the defaults for a fresh/reset brain,
+    // before REG1 ZIP hydration so surveillance monitoring is active on the first new scan.
+    loadSurvRules();
+
+    // Restore saved filters BEFORE hydration: hydration renders, and rendering saves filter
+    // state, so reading them back afterwards would persist blank inputs over the real ones.
+    try{loadFilterState();}catch(e){console.error('INIT loadFilterState failed:',e);}
+
+    setMsg('Checking local Kite helper...');
+    await helperReady;
+    console.info('Startup restore ms:',Math.round(performance.now()-startupAt));
+    // The local Kite helper owns current inputs; Drive is a backup only.
+    try{await Promise.race([hydrateSessionCSVsFromPreferredInputs('INIT'),new Promise(r=>setTimeout(r,20000))]);}catch(e){console.warn('INIT: input hydration failed',e);}
+    finishStartupUi(startupAt);
+  }finally{
+    clearTimeout(startupWatchdog);
+  }
 }
 initApp().catch(e=>{
   _startupHydrationPending=false;
-  console.error('Startup failed',e);setLoading(false);
+  console.error('Startup failed',e);
+  try{document.getElementById('hdrR').style.display='flex';document.getElementById('dash').style.display='block';}catch(_){}
+  setLoading(false);
   showToast('Startup could not finish: '+(e.message||e)+'. Helper reconnect will keep retrying.',6000,true);
   startStreamRefresh();
 });
