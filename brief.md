@@ -1,10 +1,11 @@
-# Active Task: Deployed v1765 / Operational
+# Active Task: Deployed v1766 / Operational
 
-Rocket Scanner v1765 deployed at 2026-11-20 15:36 IST. System operational and in sync with origin/master.
+Rocket Scanner v1766 deployed at 2026-11-21 09:53 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1766:** Fix startup cloud/helper loading hang, Drive request timeouts, and O(1) RSS symbol index
 - **v1765:** Fix MTF Screener instant buy/sell execution, Open Positions scores, SSE delta diff, impact hard filter, and 30m Low >= VWAP
 - **v1764:** Fix 1m/5m Osc parity, rename to MTF Screener, add max price control, cut warmup and signal-to-order latency
 - **v1763:** Add TV_SCREENER strategy with 1m/5m/15m/1D Buy ratings, NSE shareholders >5k, Day % ascending order, and fixed -1% SL + current ATR ratchet

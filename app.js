@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-20 15:36 IST'; // release build date (IST)
-const APP_VERSION=1765;
+const BUILD_TS='2026-11-21 09:53 IST'; // release build date (IST)
+const APP_VERSION=1766;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -598,6 +598,7 @@ const FS = (() => {
   let _tokenClient = null;
   let _gisLoadPromise = null;
   let _fileCache = null;
+  let _listFilesPromise = null;
   let _localDirHandle = null;
 
   function clientId(){ return (GOOGLE_DRIVE_CLIENT_ID||localStorage.getItem(CLIENT_ID_STORE)||'').trim(); }
@@ -611,7 +612,7 @@ const FS = (() => {
   function isConnected(){ return !!_accessToken&&Date.now()<_expiresAt-30000; }
   function clearSession(){
     _accessToken=null;_expiresAt=0;
-    _fileCache=null;
+    _fileCache=null;_listFilesPromise=null;
     try{sessionStorage.removeItem(SESSION_STORE);}catch(e){}
     updateFolderUI();
   }
@@ -677,12 +678,15 @@ const FS = (() => {
     if(!isConfigured()) return {ok:false,reason:'missing_client_id'};
     if(!(await waitForGIS())) return {ok:false,reason:'google_library'};
     return new Promise(resolve=>{
+      let settled=false,timer=null;
+      const finish=val=>{if(settled)return;settled=true;if(timer)clearTimeout(timer);resolve(val);};
+      if(silent) timer=setTimeout(()=>finish({ok:false,reason:'silent_timeout'}),10000);
       _tokenClient=google.accounts.oauth2.initTokenClient({
         client_id:clientId(),
         scope:SCOPE,
         callback:async response=>{
           if(response?.error||!response?.access_token){
-            resolve({ok:false,reason:response?.error||'authorization_failed'});return;
+            finish({ok:false,reason:response?.error||'authorization_failed'});return;
           }
           _accessToken=response.access_token;
           _expiresAt=Date.now()+((parseInt(response.expires_in,10)||3600)*1000);
@@ -693,9 +697,9 @@ const FS = (() => {
           try{await listAppDataFiles(true);}catch(e){console.warn('Drive file index refresh failed after connect',e);}
           let brain=null;
           try{brain=await read();}catch(e){console.warn('Drive brain read failed after connect',e);}
-          resolve({ok:true,brain});
+          finish({ok:true,brain});
         },
-        error_callback:()=>resolve({ok:false,reason:'popup_failed'})
+        error_callback:()=>finish({ok:false,reason:'popup_failed'})
       });
       _tokenClient.requestAccessToken({prompt:silent?'':''});
     });
@@ -707,9 +711,18 @@ const FS = (() => {
 
   async function request(url,options={}){
     if(!isConnected()) throw new Error('Google Drive is not connected. Click Connect Drive again.');
-    const headers=new Headers(options.headers||{});
+    const {timeoutMs=15000,...fetchOpts}=options;
+    const headers=new Headers(fetchOpts.headers||{});
     headers.set('Authorization','Bearer '+_accessToken);
-    const response=await fetch(url,{...options,headers});
+    const ctl=fetchOpts.signal?null:new AbortController();
+    const timer=ctl&&timeoutMs>0?setTimeout(()=>ctl.abort(),timeoutMs):null;
+    let response;
+    try{
+      response=await fetch(url,{...fetchOpts,headers,...(ctl?{signal:ctl.signal}:{})});
+    }catch(e){
+      if(e?.name==='AbortError') throw new Error('Google Drive request timed out');
+      throw e;
+    }finally{if(timer)clearTimeout(timer);}
     if(response.status===401){
       clearSession();
       throw new Error('Google Drive authorization expired. Click Connect Drive again.');
@@ -720,20 +733,26 @@ const FS = (() => {
   function queryName(name){ return String(name).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
   async function listAppDataFiles(force=false){
     if(_fileCache&&!force) return _fileCache;
-    const files=[];
-    let pageToken='';
-    do{
-      const url=DRIVE_API+'?spaces=appDataFolder&pageSize=100&fields=nextPageToken,files(id,name,modifiedTime,mimeType,size)&q='+encodeURIComponent('trashed=false')+(pageToken?'&pageToken='+encodeURIComponent(pageToken):'');
-      const data=await (await request(url)).json();
-      (data.files||[]).forEach(f=>files.push(f));
-      pageToken=data.nextPageToken||'';
-    }while(pageToken);
-    _fileCache=new Map();
-    files.forEach(f=>{
-      const existing=_fileCache.get(f.name);
-      if(!existing||String(f.modifiedTime||'')>String(existing.modifiedTime||'')) _fileCache.set(f.name,f);
-    });
-    return _fileCache;
+    if(_listFilesPromise&&!force) return _listFilesPromise;
+    const job=(async()=>{
+      const files=[];
+      let pageToken='',pages=0;
+      do{
+        const url=DRIVE_API+'?spaces=appDataFolder&pageSize=100&fields=nextPageToken,files(id,name,modifiedTime,mimeType,size)&q='+encodeURIComponent('trashed=false')+(pageToken?'&pageToken='+encodeURIComponent(pageToken):'');
+        const data=await (await request(url,{timeoutMs:12000})).json();
+        (data.files||[]).forEach(f=>files.push(f));
+        pageToken=data.nextPageToken||'';
+        if(++pages>=25) break;
+      }while(pageToken);
+      _fileCache=new Map();
+      files.forEach(f=>{
+        const existing=_fileCache.get(f.name);
+        if(!existing||String(f.modifiedTime||'')>String(existing.modifiedTime||'')) _fileCache.set(f.name,f);
+      });
+      return _fileCache;
+    })();
+    _listFilesPromise=job;
+    try{return await job;}finally{if(_listFilesPromise===job)_listFilesPromise=null;}
   }
   async function findFile(name){
     const cache=await listAppDataFiles();
@@ -762,7 +781,7 @@ const FS = (() => {
   async function readBlob(name){
     const meta=await findFile(name);
     if(!meta) return null;
-    const response=await request(DRIVE_API+'/'+encodeURIComponent(meta.id)+'?alt=media');
+    const response=await request(DRIVE_API+'/'+encodeURIComponent(meta.id)+'?alt=media',{timeoutMs:30000});
     return {blob:await response.blob(),meta};
   }
   async function read(){
@@ -1576,10 +1595,10 @@ function isMarketRefreshWindow(timestamp=Date.now()){
 // minute boundary (DAY_START_MIN) or when the holiday list loads, so memoise it per minute.
 let _sessionDateMemo=null;
 function getSessionDate(){
-  const minute=Math.floor(Date.now()/60000),hol=NSE_HOLIDAYS.size;
-  if(_sessionDateMemo&&_sessionDateMemo.minute===minute&&_sessionDateMemo.hol===hol&&_sessionDateMemo.set===NSE_HOLIDAYS) return _sessionDateMemo.v;
+  const minute=Math.floor(Date.now()/60000),hol=NSE_HOLIDAYS.size,live=typeof RocketStrategy!=='undefined'&&RocketStrategy.isMarketLiveOverride('nse');
+  if(_sessionDateMemo&&_sessionDateMemo.minute===minute&&_sessionDateMemo.hol===hol&&_sessionDateMemo.set===NSE_HOLIDAYS&&_sessionDateMemo.live===live) return _sessionDateMemo.v;
   const v=getModelTradingDate(Date.now());
-  _sessionDateMemo={minute,hol,set:NSE_HOLIDAYS,v};
+  _sessionDateMemo={minute,hol,set:NSE_HOLIDAYS,live,v};
   return v;
 }
 
@@ -13244,16 +13263,28 @@ function rssEventDateISO(value){
   const m=String(value||'').match(/(\d{1,2})-([A-Za-z]{3})-(\d{4})/);
   return m?nseDateToISO(`${m[1]}-${m[2]}-${m[3]}`):null;
 }
-function resolveRssSymbol(item){
+function buildRssSymbolIndex(){
   const known=new Set([...Object.keys(NSE_BHAV),...Object.keys(NSE_SERIES),...Object.keys(NSE_PRICE_BAND),...Object.keys(NSE_SECURITY_MASTER),...(ALL||[]).map(r=>normSym(r.symbol))]);
+  const byNameKey=new Map();
+  for(const [name,sym] of Object.entries(NSE_NAME_TO_SYM||{})){
+    const k=rssCompanyKey(name);
+    if(k&&!byNameKey.has(k)) byNameKey.set(k,normSym(sym));
+  }
+  for(const r of ALL||[]){
+    const s=normSym(r?.symbol),k=rssCompanyKey(r?.name);
+    if(s&&k&&!byNameKey.has(k)) byNameKey.set(k,s);
+  }
+  return {known,byNameKey};
+}
+function resolveRssSymbol(item,ctx=null){
+  const idx=ctx||buildRssSymbolIndex();
   const link=String(item?.link||''),file=decodeURIComponent(link.split('/').pop()||'');
   const prefix=normSym((file.match(/^([A-Z0-9&.-]+)_/i)||[])[1]||'');
-  if(prefix&&known.has(prefix)) return prefix;
+  if(prefix&&idx.known.has(prefix)) return prefix;
   const title=String(item?.title||'').replace(/\s+-\s+Ex-Date:[\s\S]*$/i,'').trim();
   const exact=NSE_NAME_TO_SYM[title.toUpperCase()];if(exact)return normSym(exact);
   const key=rssCompanyKey(title);
-  for(const [name,sym] of Object.entries(NSE_NAME_TO_SYM||{})) if(rssCompanyKey(name)===key)return normSym(sym);
-  const row=(ALL||[]).find(r=>rssCompanyKey(r.name)===key);return row?normSym(row.symbol):null;
+  return idx.byNameKey.get(key)||null;
 }
 function restoreNseFundamentals(){
   const saved=FS.get(NSE_FUNDAMENTAL_STORE);
@@ -13266,9 +13297,9 @@ async function refreshNseFundamentals(){
   try{
     const res=await fetch(KITE_HELPER+'/api/nse/rss',{cache:'no-store',signal:c.signal});
     const data=await res.json();if(!data?.ok)throw new Error(data?.why||'helper returned no RSS data');
-    const bySymbol={};
+    const bySymbol={},symCtx=buildRssSymbolIndex();
     for(const item of data.items||[]){
-      const symbol=resolveRssSymbol(item);if(!symbol)continue;
+      const symbol=resolveRssSymbol(item,symCtx);if(!symbol)continue;
       const text=`${item.subject||''} ${item.description||''}`;
       const event={source:item.source,title:item.title,subject:item.subject||'',description:item.description||'',pubDate:item.pubDate||'',dateISO:rssEventDateISO(item.pubDate),link:item.link||'',financial:item.financial||null,
         isResults:/financialResults|integratedFinancials/.test(item.source)||/financial results?|quarterly results?|annual results?/i.test(text),
@@ -13285,7 +13316,7 @@ async function refreshNseFundamentals(){
     return false;
   }finally{clearTimeout(timer);}
 }
-let KITE_LOGIN_PENDING=false,LAST_KITE_STATUS_AT=0;
+let KITE_LOGIN_PENDING=false,LAST_KITE_STATUS_AT=0,_startupHydrationPending=true;
 let _kiteAuthRefresh=null,_kiteReturnRefresh=null;
 async function detectKiteApi(force,options={}){
   let timer=null;
@@ -13307,7 +13338,7 @@ async function detectKiteApi(force,options={}){
   try{renderLiveTapeBar();}catch(e){}
   if(!options.statusOnly){
     try{renderTable();}catch(e){}
-    if(KITE_API){try{loadIntradayInventory();}catch(e){}}
+    if(KITE_API&&!_startupHydrationPending){try{loadIntradayInventory();}catch(e){}}
     try{maybePromptKiteToken();}catch(e){}
   }
   return KITE_API;
@@ -13737,7 +13768,7 @@ async function refreshChangedHelperInputs(){
 }
 async function fetchHelperInputList(){
   try{
-    const j=await readHelperResponse('/api/inputs/list',{timeout:5000});
+    const j=await readHelperResponse('/api/inputs/list',{timeout:12000});
     return j?.ok&&Array.isArray(j.files)?j.files:null;
   }catch(e){return null;}
 }
@@ -15266,6 +15297,7 @@ async function loadStreamStatus(){
 }
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
   if(KITE_API){
+    if(reason==='INIT') try{setMsg('Loading inputs from local Kite helper...');}catch(e){}
     const helperLoaded=await hydrateFromHelper(reason);
     if(helperLoaded){
       console.log(`${reason}: hydrated current inputs from the local Kite helper`);
@@ -15273,6 +15305,7 @@ async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
     }
   }
   if(FS.hasFolder()){
+    if(reason==='INIT') try{setMsg('Loading backup inputs from Google Drive...');}catch(e){}
     console.log(`${reason}: helper inputs unavailable; falling back to Drive backup`);
     return await hydrateSessionCSVsFromWorkspace();
   }
@@ -17111,10 +17144,13 @@ async function initApp(){
   setLoading(false);
   console.info('Startup ready ms:',Math.round(performance.now()-startupAt));
   schedulePerformanceRender();
+  _startupHydrationPending=false;
+  if(KITE_API){try{loadIntradayInventory();}catch(e){}}
   // The helper hydrates on the refresh beat; nothing watches a folder handle any more.
   startStreamRefresh();
 }
 initApp().catch(e=>{
+  _startupHydrationPending=false;
   console.error('Startup failed',e);setLoading(false);
   showToast('Startup could not finish: '+(e.message||e)+'. Helper reconnect will keep retrying.',6000,true);
   startStreamRefresh();
