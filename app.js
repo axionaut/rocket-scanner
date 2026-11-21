@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-21 16:16 IST'; // release build date (IST)
-const APP_VERSION=1774;
+const BUILD_TS='2026-11-21 17:02 IST'; // release build date (IST)
+const APP_VERSION=1775;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4897,6 +4897,9 @@ function queuePageLiveReads(names){
       if(pending.has('margins')||pending.has('portfolio')||pending.has('auto')||pending.has('positions'))tasks.push(loadKiteMargins());
       if(pending.has('nse-reports')){NSE_REPORTS_STATUS_AT=0;_lastIndependentInputCheck=0;tasks.push(refreshChangedHelperInputs());}
       if(pending.has('portfolio')){_lastIndependentInputCheck=0;tasks.push(refreshChangedHelperInputs());}
+      if(pending.has('model-comparison')||pending.has('portfolio')||pending.has('margins')){
+        if(document.getElementById('tab4')?.classList.contains('act'))tasks.push(loadModelComparison(true));
+      }
       await Promise.allSettled(tasks);
       try{renderStats();}catch(_){}
       schedulePageLivePaint(null,false,pending.has('portfolio')||pending.has('auto')||pending.has('margins'));
@@ -5173,6 +5176,7 @@ async function onModelChange(){
     RocketStrategy?.applySelectedModel(m);
     initScoreFloorUI(true);refreshBtstModelView();
     if(ALL.length)applyFilters({preservePage:true});
+    if(document.getElementById('tab4')?.classList.contains('act'))loadModelComparison(true);
   }catch(error){
     el.value=previous;
     showToast('Strategy selection could not be confirmed: '+error.message,6000,true);
@@ -16607,6 +16611,135 @@ async function saveBasketToScannerUploads(orders, filename, audit = []){
   }
 }
 
+let _mcState={data:null,loading:false,error:null,loadedAt:0};
+let _mcPollTimer=null;
+function mcFmtRs(v,signed=false){
+  const n=Number(v);if(!Number.isFinite(n))return '—';
+  const abs=Math.abs(n).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:0});
+  return (signed?(n>0?'+':n<0?'-':''):(n<0?'-':''))+'₹'+abs;
+}
+function mcFmtPct(v,signed=false){
+  const n=Number(v);if(!Number.isFinite(n))return '—';
+  return (signed&&n>0?'+':'')+n.toFixed(2)+'%';
+}
+function mcPnlColor(v){
+  const n=Number(v);if(!Number.isFinite(n)||n===0)return 'var(--t2)';
+  return n>0?'var(--green)':'var(--red)';
+}
+function mcFmtTime(ms){
+  const n=Number(ms);if(!Number.isFinite(n)||n<=0)return '—';
+  const iso=new Date(n+19800000).toISOString();
+  return iso.slice(0,10)+' '+iso.slice(11,16)+' IST';
+}
+async function loadModelComparison(force=false){
+  if(_mcState.loading)return;
+  if(!force&&_mcState.data&&Date.now()-_mcState.loadedAt<3000)return;
+  _mcState.loading=true;
+  if(!_mcState.data)renderModelComparison();
+  try{
+    const d=await readHelperResponse('/api/model-comparison',{timeout:10000});
+    _mcState.data=d;_mcState.error=d?.error||null;_mcState.loadedAt=Date.now();
+  }catch(e){
+    _mcState.error=e?.message||'Helper unavailable — start Rocket Scanner.bat';
+  }finally{
+    _mcState.loading=false;
+    renderModelComparison();
+    updateTabCounts();
+  }
+}
+async function resetModelComparison(){
+  if(!confirm('Reset paper model portfolios to start fresh from today\'s current live capital?'))return;
+  try{
+    const base=typeof KITE_HELPER!=='undefined'?KITE_HELPER:'';
+    const res=await fetch(base+'/api/model-comparison/reset',{method:'POST'});
+    const j=await res.json().catch(()=>null);
+    if(!res.ok||!j?.ok)throw new Error(j?.why||'Reset failed');
+    _mcState.data=j;_mcState.error=null;_mcState.loadedAt=Date.now();
+    renderModelComparison();
+    showToast('Comparison baseline reset to current live capital.',3500);
+  }catch(e){
+    showToast('Could not reset baseline: '+escHtml(e?.message||'unknown error'),5000,true);
+  }
+}
+function renderModelComparison(){
+  const root=document.getElementById('compareContent');
+  if(!root)return;
+  if(_mcState.error&&!_mcState.data){
+    root.innerHTML=`<div class="mc-wrap"><div class="mc-hdr"><div><div class="mc-title">⚖ Live vs Paper Model Comparison</div><div class="mc-sub" style="color:var(--red)">${escHtml(_mcState.error)}</div></div><div class="mc-actions"><button class="btn" onclick="loadModelComparison(true)">↻ Retry</button></div></div></div>`;
+    return;
+  }
+  const d=_mcState.data;
+  if(!d){
+    root.innerHTML=`<div class="mc-wrap"><div class="mc-hdr"><div><div class="mc-title">⚖ Live vs Paper Model Comparison</div><div class="mc-sub">Loading model comparison...</div></div></div></div>`;
+    return;
+  }
+  if(d.awaiting||!d.models||!Object.keys(d.models).length){
+    root.innerHTML=`<div class="mc-wrap"><div class="mc-hdr"><div><div class="mc-title">⚖ Live vs Paper Model Comparison</div><div class="mc-sub">${escHtml(d.why||'Awaiting live Kite capital snapshot (cash + holdings) to initialize equal starting capital.')}</div></div><div class="mc-actions"><button class="btn" onclick="loadModelComparison(true)">↻ Check Again</button></div></div></div>`;
+    return;
+  }
+  const order=(Array.isArray(d.modelOrder)&&d.modelOrder.length?d.modelOrder:SELECTABLE_MODELS).filter(id=>d.models[id]);
+  const cols=order.map(id=>d.models[id]);
+  const baselineRs=d.baseline?.startingCapital!=null?mcFmtRs(d.baseline.startingCapital):'—';
+  const ctrlNote=d.controls?`Pos ₹${Math.round(d.controls.minPositionRs||0).toLocaleString('en-IN')}–₹${Math.round(d.controls.maxPositionRs||0).toLocaleString('en-IN')} · Trim budget ${d.controls.lossFundingPct!=null?d.controls.lossFundingPct+'%':'unset'}`:'';
+  const thCells=cols.map(c=>`<th class="${c.isLive?'mc-col-live':''}">`
+    +`<div class="mc-mname">${escHtml(c.shortName||c.name||c.id)}<span class="mc-rank">#${c.rank||'—'}</span></div>`
+    +`<div class="mc-muted">${escHtml(c.name||'')}</div>`
+    +`<span class="mc-badge ${c.isLive?'mc-badge-live':'mc-badge-paper'}">${c.isLive?'🟢 LIVE':'📄 PAPER'}</span>`
+    +`</th>`).join('');
+  const row=(label,fn,title='')=>`<tr${title?` title="${escHtml(title)}"`:''}><td>${escHtml(label)}</td>${cols.map(c=>`<td class="${c.isLive?'mc-col-live':''}">${fn(c)}</td>`).join('')}</tr>`;
+  const sep=label=>`<tr class="mc-sep"><td colspan="${cols.length+1}">${escHtml(label)}</td></tr>`;
+  const rowsHtml=[
+    row('Execution Mode',c=>c.isLive?'<span style="color:var(--green);font-weight:700">LIVE ACCOUNT</span>':'<span style="color:var(--t2)">Paper Account</span>','Currently selected Active Strategy mirrors real Kite execution; others run independently with paper capital.'),
+    row('Signal Engine',c=>`<span style="color:${c.signalReady?'var(--green)':'var(--t2)'}" title="${escHtml(c.signalStatus||'')}">${escHtml(c.signalStatus||'—')}</span>`),
+    sep('Capital & Return'),
+    row('Starting Capital',c=>mcFmtRs(c.startingCapital),'Equal capital baseline captured from live equity (cash + holdings) at start.'),
+    row('Current Equity',c=>`<strong style="color:var(--t1)">${mcFmtRs(c.equity)}</strong>`),
+    row('Free Cash',c=>mcFmtRs(c.cash)),
+    row('Deployed Capital',c=>mcFmtRs(c.deployedValue)),
+    row('Total Net P&L',c=>`<strong style="color:${mcPnlColor(c.totalNet)}">${mcFmtRs(c.totalNet,true)} (${mcFmtPct(c.returnPct,true)})</strong>`,'Total mark-to-market change since comparison baseline after realized charges.'),
+    row('Realized Net P&L',c=>`<span style="color:${mcPnlColor(c.realizedNet)}">${mcFmtRs(c.realizedNet,true)}</span>`),
+    row('Open P&L',c=>`<span style="color:${mcPnlColor(c.openNet)}">${mcFmtRs(c.openNet,true)}</span>`),
+    sep('Trades & Risk'),
+    row('Open Positions',c=>String(c.openPositions||0)),
+    row('Closed Trades',c=>`${c.closedTrades||0} <span class="mc-muted">(${c.wins||0}W / ${c.losses||0}L)</span>`),
+    row('Win Rate',c=>c.winRatePct!=null?`${Number(c.winRatePct).toFixed(1)}%`:'—'),
+    row('Profit Factor',c=>c.profitFactor==='INF'?'∞':(c.profitFactor!=null?Number(c.profitFactor).toFixed(2):'—')),
+    row('Expectancy / Trade',c=>c.expectancy!=null?`<span style="color:${mcPnlColor(c.expectancy)}">${mcFmtRs(c.expectancy,true)}</span>`:'—'),
+    row('Max Drawdown',c=>`<span style="color:${c.maxDrawdownPct>0?'var(--red)':'var(--t2)'}">-${Number(c.maxDrawdownPct||0).toFixed(2)}%</span>`),
+    row('Total Charges',c=>mcFmtRs(c.totalCharges)),
+    row('Last Closed Trade',c=>c.lastTrade?`${escHtml(c.lastTrade.sym)} <span style="color:${mcPnlColor(c.lastTrade.net)}">${mcFmtRs(c.lastTrade.net,true)}</span>`:'<span class="mc-muted">—</span>'),
+  ].join('');
+
+  const allPositions=cols.flatMap(c=>(c.positions||[]).map(p=>({...p,modelName:c.shortName||c.id,isLive:c.isLive})));
+  const posRowsHtml=allPositions.length?allPositions.slice(0,30).map(p=>`<tr><td>${escHtml(p.modelName)}${p.isLive?' <span style="color:var(--green);font-size:10px">LIVE</span>':''}</td><td><b>${escHtml(p.sym)}</b></td><td>${p.qty}</td><td>₹${Number(p.avgCost||0).toFixed(2)}</td><td>₹${Number(p.mark||0).toFixed(2)}</td><td style="color:${mcPnlColor(p.openNet)}">${mcFmtRs(p.openNet,true)}</td><td>${p.stop>0?'₹'+Number(p.stop).toFixed(2):'—'}</td></tr>`).join(''):`<tr><td colspan="7" style="text-align:center;color:var(--t3)">No open positions across models</td></tr>`;
+
+  const allTrades=cols.flatMap(c=>(c.recentTrades||[]).map(t=>({...t,modelName:c.shortName||c.id,isLive:c.isLive}))).sort((a,b)=>(b.at||0)-(a.at||0)).slice(0,25);
+  const tradeRowsHtml=allTrades.length?allTrades.map(t=>`<tr><td>${escHtml(mcFmtTime(t.at).slice(11,16))}</td><td>${escHtml(t.modelName)}</td><td><b>${escHtml(t.sym)}</b></td><td>${t.qty}</td><td>₹${Number(t.buyPrice||0).toFixed(1)} → ₹${Number(t.sellPrice||0).toFixed(1)}</td><td style="color:${mcPnlColor(t.net)}">${mcFmtRs(t.net,true)}</td><td style="color:var(--t3)">${escHtml(t.reason||'—')}</td></tr>`).join(''):`<tr><td colspan="7" style="text-align:center;color:var(--t3)">No closed comparison trades yet</td></tr>`;
+
+  root.innerHTML=`<div class="mc-wrap">`
+    +`<div class="mc-hdr">`
+      +`<div>`
+        +`<div class="mc-title">⚖ Live vs Paper Model Comparison</div>`
+        +`<div class="mc-sub">Started <b>${escHtml(mcFmtTime(d.startedAt))}</b> · Seed capital <b>${baselineRs}</b> (live cash ${mcFmtRs(d.baseline?.cash)} + holdings ${mcFmtRs(d.baseline?.holdingsValue)}) · ${escHtml(ctrlNote)}</div>`
+      +`</div>`
+      +`<div class="mc-actions">`
+        +`<span class="mc-muted">Updated ${escHtml(mcFmtTime(d.asOf))}</span>`
+        +`<button class="btn" onclick="loadModelComparison(true)">↻ Refresh</button>`
+        +`<button class="btn" onclick="resetModelComparison()" style="border-color:rgba(245,158,11,.35);color:var(--amber)">Reset Baseline</button>`
+      +`</div>`
+    +`</div>`
+    +(d.error?`<div class="perf-pending" style="border-color:rgba(239,68,68,.35);color:var(--red)">${escHtml(d.error)}</div>`:'')
+    +`<div class="mc-table-wrap"><table class="mc-matrix"><thead><tr><th>Parameter</th>${thCells}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`
+    +`<div class="mc-subgrid">`
+      +`<div class="mc-card"><h3><span>Open Positions</span><span class="mc-muted">${allPositions.length} total</span></h3><div style="overflow-x:auto"><table class="mc-mini"><thead><tr><th>Model</th><th>Symbol</th><th>Qty</th><th>Avg</th><th>LTP</th><th>Open P&amp;L</th><th>Stop</th></tr></thead><tbody>${posRowsHtml}</tbody></table></div></div>`
+      +`<div class="mc-card"><h3><span>Recent Closed Trades</span><span class="mc-muted">${allTrades.length} shown</span></h3><div style="overflow-x:auto"><table class="mc-mini"><thead><tr><th>IST</th><th>Model</th><th>Symbol</th><th>Qty</th><th>Entry → Exit</th><th>Net P&amp;L</th><th>Reason</th></tr></thead><tbody>${tradeRowsHtml}</tbody></table></div></div>`
+    +`</div>`
+    +`</div>`;
+}
+function syncModelCompareTimer(active){
+  clearInterval(_mcPollTimer);_mcPollTimer=null;
+  if(active)_mcPollTimer=setInterval(()=>{if(document.getElementById('tab4')?.classList.contains('act'))loadModelComparison(false);else syncModelCompareTimer(false);},5000);
+}
 function switchTab(n){
   document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>t.classList.toggle('act',i===n));
   document.querySelectorAll('.tp').forEach((t,i)=>t.classList.toggle('act',i===n));
@@ -16617,6 +16750,7 @@ function switchTab(n){
   // Performance analytics are intentionally deferred so tab switching paints immediately.
   if(n===2){if(PERF_DIRTY||!PERF_RENDERED)schedulePerformanceRender();}
   if(n===3&&window.RocketFinance) window.RocketFinance.render();
+  if(n===4){renderModelComparison();loadModelComparison(true);syncModelCompareTimer(true);}else{syncModelCompareTimer(false);}
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
   requestAnimationFrame(balanceGrids);
@@ -16624,10 +16758,16 @@ function switchTab(n){
 function updateTabCounts(){
   const c0=document.getElementById('tabCount0');
   const c1=document.getElementById('tabCount1');
+  const c4=document.getElementById('tabCount4');
   const count=dashboardRows().length;
   if(c0) c0.textContent=count?'('+count+')':'';
   const mrmrCnt=(BTST.data||BTST.rank)?.mrmr?.featureCount||218;
   if(c1) c1.textContent=(floorModel()==='MRMR'||floorModel()==='MARKOV_3PCT')?`(${mrmrCnt})`:(RADAR.features.length?'('+RADAR.features.length+')':'');
+  if(c4){
+    const models=Object.values(_mcState.data?.models||{});
+    const best=models.length?models.slice().sort((a,b)=>(b.totalNet||0)-(a.totalNet||0))[0]:null;
+    c4.textContent=best?`(${mcFmtPct(best.returnPct,true)})`:'(4)';
+  }
 }
 
 // ── NSE Direct Fetch ──
