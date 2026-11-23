@@ -197,7 +197,7 @@
       : ((b.score||0)-(a.score||0)||((a.triggerAt??Infinity)-(b.triggerAt??Infinity))||(b.rvol||0)-(a.rvol||0)||(b.barRs||0)-(a.barRs||0)||a.symbol.localeCompare(b.symbol)));
     const fees=account.orderCharges||((qty,price)=>sumChargeParts(calcZerodhaChargesSplit(price,qty,false,false,false)));
     const quantity=(budget,r)=>{
-      if(!account.orderCharges)return quantityWithinBudget(budget,r.price,r.unit??r.unitDebit);
+      if(!(r.price>0))return 0;
       let lo=0,hi=Math.floor(budget/r.price);
       while(lo<hi){const n=Math.ceil((lo+hi)/2);if(n*r.price+fees(n,r.price)<=budget+1e-7)lo=n;else hi=n-1;}
       return lo;
@@ -236,7 +236,9 @@
     for(let i=0;i<60;i++){const mid=(lo+hi)/2,total=selected.reduce((n,r)=>n+Math.max(r.floor,Math.min(r.ceiling,mid*r.score)),0);if(total>target)hi=mid;else lo=mid;}
     let remaining=spendable;
     for(const r of selected){
-      const budget=Math.max(r.floor,Math.min(r.ceiling,lo*r.score)),qty=Math.max(r.minimum,quantity(budget,r));
+      const cap=Math.min(remaining,r.ceiling),budget=Math.max(r.floor,Math.min(cap,lo*r.score));
+      let qty=Math.max(r.minimum,quantity(budget,r));
+      while(qty>r.minimum&&(qty*r.price+fees(qty,r.price))>cap+1e-7)qty--;
       const cost=qty*r.price,charges=fees(qty,r.price),debit=cost+charges;
       if(debit>remaining+1e-7||debit>r.ceiling+1e-7)throw Error('Score allocation exceeded its funded capacity');
       alloc[r.symbol]={qty,capital:cost,charges,debit,budget,minimum:inclusive?r.floor:r.minimum*r.price,score:r.score,weight:r.score/selected.reduce((n,x)=>n+x.score,0)};remaining-=debit;
@@ -257,7 +259,8 @@
       !isSwap&&Number(request.allocationBudget)>0?Number(request.allocationBudget):Infinity);
     if(!isSwap&&Number(live.minAllocationRs)>budget+1e-7)throw Error('Cash left is below the minimum all-in allocation');
     const unit=isSwap?request.cap*1.003:accountEntryDebit(1,request.cap);
-    const qty=Math.min(request.qty,quantityWithinBudget(budget,request.cap,unit));
+    let qty=Math.min(request.qty,quantityWithinBudget(budget,request.cap,unit));
+    if(!isSwap){while(qty>0&&accountEntryDebit(qty,request.cap)>budget+1e-7)qty--;}
     if(!(qty>0)) {
       if(isSwap)throw Error('Cash unavailable: waiting for sacrifice sell fill');
       throw Error('Entry no longer fits available cash');

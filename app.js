@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-23 09:39 IST'; // release build date (IST)
-const APP_VERSION=1776;
+const BUILD_TS='2026-11-23 10:22 IST'; // release build date (IST)
+const APP_VERSION=1777;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12202,7 +12202,7 @@ function renderHead(force=false){
   table.classList.toggle('avwap-table',model==='AVWAP_CROSS'||model==='TV_SCREENER');
   table.querySelector('colgroup[data-rank-layout]')?.remove();
   if(model==='AVWAP_CROSS'){const group=document.createElement('colgroup');group.dataset.rankLayout='true';group.innerHTML=['96px','20%','auto','170px','130px','150px','110px','140px'].map(width=>'<col style="width:'+width+'">').join('');table.prepend(group);}
-  if(model==='TV_SCREENER'){const group=document.createElement('colgroup');group.dataset.rankLayout='true';group.innerHTML=['96px','18%','auto','150px','210px','220px','145px','145px'].map(width=>'<col style="width:'+width+'">').join('');table.prepend(group);}
+  if(model==='TV_SCREENER'){const group=document.createElement('colgroup');group.dataset.rankLayout='true';group.innerHTML=['72px','17%','auto','145px','195px','210px','185px','165px'].map(width=>'<col style="width:'+width+'">').join('');table.prepend(group);}
   const timingBlocked=false; // the clock never disables selection (owner, v1068)
   tHeadEl.innerHTML='<tr>'+COLS.map(c=>{
     if(c.key==='chk'){

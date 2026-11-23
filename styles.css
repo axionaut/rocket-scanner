@@ -369,8 +369,10 @@ table thead th[aria-sort="ascending"]::after{content:" ▲";color:var(--blue)}
 table thead th[aria-sort="descending"]::after{content:" ▼";color:var(--blue)}
 
 /* Model table: compact rank, aligned numeric columns, consistent cell padding. */
-table.main.avwap-table{table-layout:fixed;min-width:1150px}
+table.main td[data-key="exit"],table.main td[data-key="alloc"]{white-space:normal;overflow-wrap:anywhere;line-height:1.35}
+table.main.avwap-table{table-layout:fixed;min-width:1240px}
 table.main.avwap-table thead th,table.main.avwap-table tbody td{padding:12px;vertical-align:middle}
+table.main.avwap-table tbody td{overflow:hidden}
 table.main.avwap-table [data-key="defaultRank"]{text-align:center!important}
 table.main.avwap-table [data-key="price"],table.main.avwap-table [data-key="sessionVwap"],table.main.avwap-table [data-key="anchoredVwap"],table.main.avwap-table [data-key="vwapGap"],table.main.avwap-table [data-key="alloc"]{text-align:right;font-variant-numeric:tabular-nums}
 table.main.avwap-table td.recommendation-status{min-width:0;max-width:none}
