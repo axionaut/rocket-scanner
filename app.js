@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-23 11:05 IST'; // release build date (IST)
-const APP_VERSION=1778;
+const BUILD_TS='2026-11-23 11:19 IST'; // release build date (IST)
+const APP_VERSION=1777;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8444,22 +8444,34 @@ function goalAllocationExplanation(){
 // v1424: an empty Capital field means Kite's live allocatable cash (equity `net`, the "Available"
 // figure in Kite's order window), fetched by the helper. It already nets today's buys, sale credits
 // and payouts. Used only while fresh; otherwise the computed book is the fallback, as before.
-var KITE_MARGINS={net:null,at:0,available:null,utilised:null};
+var KITE_MARGINS={net:null,at:0,reserved:0,unknownReserved:0,unknownSyms:[],available:null,utilised:null};
 const KITE_MARGINS_MAX_AGE_MS=5*60*1000;
 function getKiteAvailableCash(){
-  return (KITE_MARGINS.net!=null&&Date.now()-KITE_MARGINS.at<KITE_MARGINS_MAX_AGE_MS)?KITE_MARGINS.net:null;
+  return (KITE_MARGINS.net!=null&&Date.now()-KITE_MARGINS.at<KITE_MARGINS_MAX_AGE_MS)?Math.max(0,KITE_MARGINS.net-(Number(KITE_MARGINS.reserved)||0)):null;
+}
+async function releaseUnknownCashLocks(btn){
+  if(btn){btn.disabled=true;btn.textContent='Checking Kite…';}
+  try{
+    const r=await fetch(KITE_HELPER+'/api/auto-buy/release-unknown',{method:'POST'});
+    const j=await r.json();
+    if(!j?.ok)throw Error(j?.why||'Could not release lock');
+    await loadKiteMargins();
+    renderTradingDashboardNow();
+    showToast(j.released?.length?`Released ₹${Math.round(KITE_MARGINS.unknownReserved||0)>0?'remaining':'cash'} lock after verifying ${j.released.join(', ')} absent in Kite orders.`:'No absent unresolved locks found.',4000);
+  }catch(e){showToast('Release lock failed: '+e.message,5000,true);}
+  finally{if(btn){btn.disabled=false;btn.textContent='Verify & Release';}}
 }
 async function loadKiteMargins(){
   if(!KITE_API) return;
   const j=await readHelperResponse('/api/kite/margins',{timeout:8000}).catch(()=>null);
   if(!j||!j.ok||!Number.isFinite(Number(j.net))) return;
-  const prev=KITE_MARGINS.net;
-  KITE_MARGINS={net:Math.max(0,Number(j.net)),at:Date.now(),available:j.available||null,utilised:j.utilised||null};
+  const prevNet=KITE_MARGINS.net,prevResv=KITE_MARGINS.reserved||0;
+  KITE_MARGINS={net:Math.max(0,Number(j.net)),reserved:Math.max(0,Number(j.reserved)||0),unknownReserved:Math.max(0,Number(j.unknownReserved)||0),unknownSyms:Array.isArray(j.unknownSyms)?j.unknownSyms:[],at:Date.now(),available:j.available||null,utilised:j.utilised||null};
   updateFilterPlaceholders();
-  if(prev!==KITE_MARGINS.net&&!(parseFloat(document.getElementById('fCapital')?.value)>0)&&ALL.length){
+  if((prevNet!==KITE_MARGINS.net||prevResv!==KITE_MARGINS.reserved)&&!(parseFloat(document.getElementById('fCapital')?.value)>0)&&ALL.length){
     _dualPlanMemo=null;_maxAllocMemo=null;scheduleApplyFilters();
   }
-  try{renderStats();}catch(_){}
+  try{renderStats();renderStatusBar();}catch(_){}
 }
 // v1427: the owner's active sell GTTs from Kite, keyed by symbol. The Target column shows these when
 // present - they ARE the exits - instead of a price re-derived from average cost.
@@ -8853,8 +8865,9 @@ function updateFilterPlaceholders(){
   if(capEl){
     if(kiteCash!=null){
       const a=KITE_MARGINS.available||{},u=KITE_MARGINS.utilised||{},f=v=>'₹'+(Number(v)||0).toLocaleString('en-IN',{maximumFractionDigits:2});
+      const rsv=Number(KITE_MARGINS.reserved)||0;
       capEl.placeholder=kiteCash.toFixed(2);
-      capEl.title=`Empty = Kite available cash ${f(kiteCash)}, refreshed every 20 s (as of ${new Date(KITE_MARGINS.at).toLocaleTimeString('en-IN',{hour12:false})}).\n= opening balance ${f(a.opening_balance)} + intraday pay-in ${f(a.intraday_payin)} − debits ${f(u.debits)} − payout ${f(u.payout)}\n(debits = today's delivery buys ${f(u.delivery)} − sale credit ${f(u.holding_sales)} + charges/other)\nType a value to override.`;
+      capEl.title=`Empty = spendable Kite cash ${f(kiteCash)} (net ${f(KITE_MARGINS.net)}${rsv>0?` − ${f(rsv)} held for pending/unknown orders`:''}), refreshed every 20 s (as of ${new Date(KITE_MARGINS.at).toLocaleTimeString('en-IN',{hour12:false})}).\n= opening balance ${f(a.opening_balance)} + intraday pay-in ${f(a.intraday_payin)} − debits ${f(u.debits)} − payout ${f(u.payout)}\n(debits = today's delivery buys ${f(u.delivery)} − sale credit ${f(u.holding_sales)} + charges/other)\nType a value to override.`;
     } else { const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions); Kite cash unavailable. Type a value to override.`; } }
   }
   const riskEl=document.getElementById('fRiskPerTrade');
@@ -15130,6 +15143,10 @@ function renderStatusBar(){
     const trimCol=bSum.avail>=50?'var(--amber)':bSum.res>0?'var(--cyan)':'var(--t3)';
     const trimLabel=bSum.activeTrims.length?`✂️ ${escHtml(bSum.activeTrims[0].sym)} ×${bSum.activeTrims[0].lossGttQty} (${fmtINR(bSum.avail)} left)`:`✂️ trim budget ${fmtINR(bSum.avail)}`;
     bits.push(`<span style="color:${trimCol}" title="${escHtml(bSum.tip)}">${trimLabel}</span>`);
+  }
+  if(KITE_MARGINS.unknownReserved>0){
+    const syms=(KITE_MARGINS.unknownSyms||[]).join(', ');
+    bits.push(`<span style="color:var(--amber)" title="Cash held for unconfirmed browser entries (${escHtml(syms)}). Verify against live Kite orders to unlock.">🔒 ${fmtINR(KITE_MARGINS.unknownReserved)} locked (${escHtml(syms)}) <button class="btn" style="padding:1px 6px;font-size:11px;margin-left:4px" onclick="releaseUnknownCashLocks(this)">Verify & Release</button></span>`);
   }
   let tape='';
   try{tape=compactTapeStatus();}catch(e){}

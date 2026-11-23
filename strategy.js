@@ -245,7 +245,7 @@
     }
     // Largest remainders; no cash overrun or fractional shares.
     const rounding=[...selected].sort((a,b)=>((alloc[b.symbol].budget/ b.unit)%1)-((alloc[a.symbol].budget/a.unit)%1)||(sortByDayPctAsc?((Number.isFinite(Number(a.dayPct))?Number(a.dayPct):Infinity)-(Number.isFinite(Number(b.dayPct))?Number(b.dayPct):Infinity)):(b.score-a.score)));
-    for(const r of rounding){const x=alloc[r.symbol],extra=r.price+fees(x.qty+1,r.price)-x.charges;if(extra>remaining+1e-7||x.debit+extra>r.ceiling+1e-7)continue;x.qty++;x.capital=x.qty*r.price;x.charges=fees(x.qty,r.price);const debit=x.capital+x.charges;remaining-=debit-x.debit;x.debit=debit;}
+    for(const r of rounding){const x=alloc[r.symbol],extra=r.price+fees(x.qty+1,r.price)-x.charges;if(extra>remaining+1e-7||x.debit+extra>r.ceiling+1e-7)continue;x.qty++;x.capital=x.qty*r.price;x.charges=fees(x.qty,r.price);const debit=x.capital+x.charges;remaining-=debit-x.debit;x.debit=debit;x.budget=Math.max(x.budget,debit);}
     return {alloc,reasons,funded:selected.map(r=>r.symbol),remaining,minimum:breakevenTurnover(false,account.mlot),mode:'score-proportional'};
   }
 
