@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-23 10:53 IST'; // release build date (IST)
-const APP_VERSION=1777;
+const BUILD_TS='2026-11-23 11:05 IST'; // release build date (IST)
+const APP_VERSION=1778;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5530,6 +5530,8 @@ function invalidateLiveEvidence(reason){
   if(ALL.length)applyFilters({preservePage:true});
 }
 function acceptStreamEvidence(status){
+  try{document.querySelector('[data-lna-banner]')?.remove();}catch(e){}
+  _lnaFailCount=0;
   if(status?.marketLive||(status?.connected&&status?.lastTickAt&&Date.now()-status.lastTickAt<=45000)){
     if(typeof RocketStrategy!=='undefined')RocketStrategy.setMarketLiveOverride('nse',true,'server_live_stream',Date.now());
   }
@@ -13547,8 +13549,15 @@ async function refreshNseFundamentals(){
     return false;
   }finally{clearTimeout(timer);}
 }
-let KITE_LOGIN_PENDING=false,LAST_KITE_STATUS_AT=0,_startupHydrationPending=true;
+let KITE_LOGIN_PENDING=false,LAST_KITE_STATUS_AT=0,_startupHydrationPending=true,_lnaFailCount=0,_lnaRetryTimer=null;
 let _kiteAuthRefresh=null,_kiteReturnRefresh=null;
+async function probeLocalHelperHealth(timeoutMs=6000){
+  const c=new AbortController(),timer=setTimeout(()=>c.abort(),timeoutMs);
+  try{
+    const r=await fetch(KITE_HELPER+'/api/health',{cache:'no-store',signal:c.signal});
+    return r.ok;
+  }catch(_){return false;}finally{clearTimeout(timer);}
+}
 async function requestLocalHelperAccess(){
   const res=await detectKiteApi(true);
   if(res){
@@ -13557,7 +13566,7 @@ async function requestLocalHelperAccess(){
     renderTradingDashboardNow();
     return true;
   }
-  showToast('Chrome blocked localhost:8787 from axionaut.github.io. Click the Site Settings icon left of the URL bar → Local network / Apps on device → Allow → Reload (or open http://localhost:8787/ directly).',9000,true);
+  showToast('Cannot reach localhost:8787. Ensure Start Rocket Scanner.bat is running, or check Chrome Site Settings → Local network → Allow.',9000,true);
   return false;
 }
 function renderLocalHelperAccessBanner(){
@@ -13568,18 +13577,19 @@ function renderLocalHelperAccessBanner(){
   pill.className='info-pill pill-amber';
   pill.dataset.lnaBanner='1';
   pill.style.cssText='display:inline-flex;align-items:center;gap:8px;font-weight:700';
-  pill.innerHTML='⚠ Browser blocked local helper access (localhost:8787) <button class="btn" style="padding:2px 8px;font-size:12px" onclick="requestLocalHelperAccess()">Connect Helper</button> <a href="http://localhost:8787/" style="color:inherit;text-decoration:underline;font-weight:700">Open localhost:8787</a>';
+  pill.innerHTML='⚠ Local helper unreachable or blocked by browser (localhost:8787) <button class="btn" style="padding:2px 8px;font-size:12px" onclick="requestLocalHelperAccess()">Connect Helper</button> <a href="http://localhost:8787/" style="color:inherit;text-decoration:underline;font-weight:700">Open localhost:8787</a>';
   bar.appendChild(pill);
 }
 async function detectKiteApi(force,options={}){
-  let timer=null;
+  let timer=null,helperAlive=false;
   try{
     const c=new AbortController();
-    timer=setTimeout(()=>c.abort(),force?8000:3000);
+    timer=setTimeout(()=>c.abort(),force?12000:10000);
     const r=await fetch(KITE_HELPER+'/api/kite/status'+(force?'?force=1':''),{cache:'no-store',signal:c.signal});
     const next=r.ok?await r.json():null;
     if(!next?.ok) throw new Error('Kite status unavailable');
-    KITE_API=next;LAST_KITE_STATUS_AT=Date.now();
+    KITE_API=next;LAST_KITE_STATUS_AT=Date.now();_lnaFailCount=0;
+    if(_lnaRetryTimer){clearTimeout(_lnaRetryTimer);_lnaRetryTimer=null;}
     FS.queuePortableSettings();
     try{document.querySelector('[data-lna-banner]')?.remove();}catch(e){}
     if(KITE_API.mode==='connect') KITE_CONNECT_SEEN=true;
@@ -13587,15 +13597,22 @@ async function detectKiteApi(force,options={}){
       KITE_LOGIN_PENDING=false;KITE_TOKEN_PROMPTED=false;
     }
   }catch(e){
-    // A slow status request does not invalidate the last known authentication state.
-    if(!options.statusOnly) KITE_API=null;
+    helperAlive=await probeLocalHelperHealth(5000);
+    if(helperAlive){
+      _lnaFailCount=0;
+      try{document.querySelector('[data-lna-banner]')?.remove();}catch(_){}
+      if(!_lnaRetryTimer)_lnaRetryTimer=setTimeout(()=>{_lnaRetryTimer=null;detectKiteApi(false,options).catch(()=>{});},2500);
+    }else{
+      _lnaFailCount++;
+      if(!options.statusOnly) KITE_API=null;
+    }
   }finally{if(timer)clearTimeout(timer);}
   try{renderLiveTapeBar();}catch(e){}
   if(!options.statusOnly){
     try{renderTable();}catch(e){}
     if(KITE_API&&!_startupHydrationPending){try{loadIntradayInventory();}catch(e){}}
     try{maybePromptKiteToken();}catch(e){}
-    if(!KITE_API) try{renderLocalHelperAccessBanner();}catch(e){}
+    if(!KITE_API&&!helperAlive&&(_lnaFailCount>=2||force)) try{renderLocalHelperAccessBanner();}catch(e){}
   }
   return KITE_API;
 }
