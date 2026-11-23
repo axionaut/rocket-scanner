@@ -1,10 +1,11 @@
-# Active Task: Deployed v1780 / Operational
+# Active Task: Deployed v1781 / Operational
 
-Rocket Scanner v1780 deployed at 2026-11-23 12:21 IST. System operational and in sync with origin/master.
+Rocket Scanner v1781 deployed at 2026-11-23 13:33 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1781:** Fix SELL IOC bridge, -0.1% GTT buffer, and 1-paisa tightening trail
 - **v1780:** Immediate 1% trailing SL to breakeven then ATR ratchet capped at 1% max trail
 - **v1779:** Restore helper tail, fix Saturday startup banner & timeouts, and align model comparison allocation
 - **v1778:** Fix false local helper blocked banner during warm-up and auto-clear on stream recovery
