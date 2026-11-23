@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-23 13:33 IST'; // release build date (IST)
-const APP_VERSION=1781;
+const BUILD_TS='2026-11-23 14:21 IST'; // release build date (IST)
+const APP_VERSION=1782;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5981,7 +5981,7 @@ function tvScreenerCell(s,key){
 function exitCellHtml(s){
   const p=PROFIT_LOCK_STATUS.bySym.get(normSym(s.symbol));
   if(!p||!(p.qty>0)){
-    if(floorModel()==='TV_SCREENER')return '<span style="color:var(--t3)" title="Fixed -1% SL until breakeven, then 1p server trail starting at 1.00% (-0.01% per drop, min 0.01%)">-1% → BE trail</span>';
+    if(floorModel()==='TV_SCREENER')return '<span style="color:var(--t3)" title="1% SL ratchets upward on highs from entry; at BE tightens -0.01% per drop (min 0.01%) and locks BE at BE+0.30%">1% ratchet → BE lock</span>';
     return '<span style="color:var(--t3)">—</span>';
   }
   const sl=Number(p.stopGttTrigger),a=p.bracket?.atr;
@@ -5989,8 +5989,8 @@ function exitCellHtml(s){
     const isSl1=p.exitPolicy==='rs-sl1pct-atr-ratchet-v1';
     const tp=Number(p.bracket?.trailPct);
     const trailStr=(Number.isFinite(tp)?tp:1).toFixed(2)+'% trail SL';
-    const mode=isSl1?(!p.bracket?.atrArmed?'fixed -1% SL':trailStr):(a?.mode==='MINIMUM'?'minimum trail':a?.mode==='TIGHTENING'?'tightening':'ATR trail');
-    const detail=isSl1?(!p.bracket?.atrArmed?'Fixed -1% SL held until breakeven, then starts 1.00% trail (-0.01% per drop)':`Server 1p ratchet at ${(Number.isFinite(tp)?tp:1).toFixed(2)}% below peak (tightens 0.01% per drop, min 0.01%)`):(a?'Initial ATR ₹'+a.initialAtr.toFixed(2)+'; current distance ₹'+a.distance.toFixed(2):'Existing locked protection retained');
+    const mode=isSl1?(!p.bracket?.atrArmed?'1% ratchet SL':trailStr):(a?.mode==='MINIMUM'?'minimum trail':a?.mode==='TIGHTENING'?'tightening':'ATR trail');
+    const detail=isSl1?(!p.bracket?.atrArmed?'Starts at -1%, ratchets upward on 1p highs from entry; arms drop tightening at breakeven':'Server 1p ratchet at '+(Number.isFinite(tp)?tp:1).toFixed(2)+'% below peak (tightens 0.01% per drop, locks BE at BE+0.30%)'):(a?'Initial ATR ₹'+a.initialAtr.toFixed(2)+'; current distance ₹'+a.distance.toFixed(2):'Existing locked protection retained');
     const displaySl=isSl1&&Number(p.bracket?.lower)>sl?Number(p.bracket.lower):sl;
     return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="${detail}; stop only moves upward"><span style="color:var(--red)">SL ₹${displaySl.toFixed(2)}</span> <span style="color:var(--t3)">(${mode})</span></div>`;
   }
@@ -11641,8 +11641,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
       stopPct: 1,
       viable: true,
       targetPolicy: 'rs-sl1pct-atr-ratchet-v1',
-      targetSource: 'No fixed target cap: fixed -1% SL until breakeven, then 1-paisa server trail from 1.00% tightening 0.01% per drop (min 0.01%).',
-      stopSource: '-1% fixed SL GTT right after buy fill (no profit-funding block), then server 1p ratchet from 1.00% (-0.01% per drop) with IOC exit & GTT backup.',
+      targetSource: 'No fixed target cap: 1% SL ratchets upward on highs from entry, arms -0.01%/drop tightening at breakeven (min 0.01%) and locks BE at BE+0.30%.',
+      stopSource: '-1% SL ratcheting up on 1p highs from buy fill, tightening 0.01%/drop after breakeven with BE lock at BE+0.30% and Chrome Bridge SELL IOC.',
       rewardRisk: null
     };
   }
@@ -12648,7 +12648,7 @@ function dashboardMarketCards(){
     add(2,'NSE',`${go} GO`,floorModel()==='AVWAP_CROSS'?'Hard filters + 1st 5m close > T-2 AVWAP + 4-candle uptrend + 0.20%-0.60% jump + Room>0.8% + CLV>=0.75':floorModel()==='TV_SCREENER'?'All 12 MA/Osc/Tech ratings Buy/Strong Buy · Day % ascending':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
-    if(floorModel()==='TV_SCREENER')add(3,'NSE','-1% SL → 1p trail','Fixed -1% until breakeven, then 1.00% trail (-0.01% per drop, min 0.01%)');
+    if(floorModel()==='TV_SCREENER')add(3,'NSE','1% ratchet → BE lock','Ratchets up from entry; at BE tightens -0.01%/drop (min 0.01%) and locks BE at +0.30%');
     else if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','No minimum hold; no maximum');
     else add(3,'NSE',signed(tgt),`Target ${signed(tgt)}${sl > 0 ? ` | SL -${sl.toFixed(1)}%` : ' | Ratcheting MLoT trail'}`);
   }
