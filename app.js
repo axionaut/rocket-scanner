@@ -1,4 +1,4 @@
-const BUILD_TS='2026-11-23 10:22 IST'; // release build date (IST)
+const BUILD_TS='2026-11-23 10:53 IST'; // release build date (IST)
 const APP_VERSION=1777;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
@@ -5613,7 +5613,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
   if(floorModel()==='MARKOV_3PCT'){
     const source=BTST.data,sym=normSym(s.symbol);
-    if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
     if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     const decision=RocketStrategy.memEntryState(source,sym,_universeMap.get(s.symbol),Date.now());
     if(decision.state!=='GO')return decision;
@@ -5623,7 +5622,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
   if(floorModel()==='AVWAP_CROSS'){
     const sym=normSym(s.symbol);
-    if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
     if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     const decision=RocketStrategy.avwapEntryState(btstRanking()?.src,sym);
     if(decision.state!=='GO')return decision;
@@ -5634,7 +5632,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
   if(floorModel()==='MRMR'){
     const source=BTST.data||BTST.rank,sym=normSym(s.symbol);
-    if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
     if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     if(!source||source.activeModel!=='MRMR'||!source.mrmr?.ok||source.mrmr.indicatorVersion!==RocketStrategy.MRMR_INDICATOR_VERSION){
       return {state:'WAIT',reason:source?.mrmr?.reason||'Awaiting Original mRMR prior-close return scores (218 features)'};
@@ -5659,7 +5656,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
   if(floorModel()==='TV_SCREENER'){
     const sym=normSym(s.symbol);
-    if(getCombinedOpenPositionMap()[s.symbol]?.qty>0)return {state:'WAIT',reason:'Position already held'};
     if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     const src=btstRanking()?.src;
     if(!src||src.activeModel!=='TV_SCREENER'||!src.tvScreener?.ok){
@@ -15110,7 +15106,7 @@ function renderStatusBar(){
     const label=nse.error?'update failed':nse.busy?'checking':nse.reports?.length?`${nse.reports.length} reports${time?' | checked '+time+' IST':''}`:'awaiting download';
     bits.push(`<span style="color:var(--${nse.error?'amber':'t2'})" title="${escHtml(nse.error||'NSE reports download automatically at helper startup and every 15 minutes')}">NSE: ${escHtml(label)}</span>`);
   }
-  if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
+  if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Currently held stocks in the universe (additional buys allowed up to Max position ₹ unless already bought this session).">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
   const bSum=lossBudgetSummary();
   if(bSum){
@@ -15232,6 +15228,16 @@ function _retiredGoalPopover(){
     pop.style.display='none';
   }
 }
+const NSE_REPORTS_BOOKMARKLET='javascript:(function(){try{const keep=["bhavcopy (pr)","market activity report","bulk deals","block deals","full bhavcopy and security deliverable data","52 week high low report","cm - price band complete list","surveillance indicator new","var end of day file","price band changes from next trade date","cm - mii - security file"];const root=document.getElementById("cr_equity_daily"),button=document.getElementById("cr_equity_daily_downloadbtn");if(!root||!button)throw Error("Open NSE All Reports, then try again.");const cards=Array.from(root.querySelectorAll(".reportsDownload")),selected=new Map();cards.forEach(card=>{const label=card.querySelector("label"),checkbox=label&&label.querySelector(\'input[type="checkbox"]\'),title=label?label.textContent.replace(/\\s+/g," ").trim().toLowerCase():"",match=keep.find(item=>title.includes(item));if(match&&checkbox&&card.getAttribute("data-link")&&!selected.has(match))selected.set(match,card)});const missing=keep.filter(item=>!selected.has(item));if(missing.length)throw Error("Found "+selected.size+" of 11 reports. Missing: "+missing.join(", ")+". Wait for the page to finish loading and try again.");const wanted=new Set(selected.values());cards.forEach(card=>{const label=card.querySelector("label"),checkbox=label&&label.querySelector(\'input[type="checkbox"]\'),show=wanted.has(card);card.style.display=show?"":"none";if(checkbox&&checkbox.checked!==show)checkbox.click()});button.click()}catch(error){alert("NSE Reports: "+error.message)}})();';
+async function copyNseBookmarklet(btn){
+  try{
+    if(navigator.clipboard?.writeText) await navigator.clipboard.writeText(NSE_REPORTS_BOOKMARKLET);
+    else{
+      const ta=document.createElement('textarea');ta.value=NSE_REPORTS_BOOKMARKLET;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
+    }
+    if(btn){const prev=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=prev;},1500);}
+  }catch(_){showToast('Could not copy NSE bookmarklet to clipboard',3000,true);}
+}
 function toggleRequiredFilesPopover(){
   const pop=document.getElementById('requiredFilesPopover');
   if(!pop) return;
@@ -15247,6 +15253,24 @@ function toggleRequiredFilesPopover(){
     }else if(!content.innerHTML){
       const grid=document.getElementById('requiredFilesGrid');
       if(grid) content.innerHTML=grid.innerHTML;
+    }
+    if(!content.querySelector('.nse-bookmarklet-bar')){
+      const bar=document.createElement('div');
+      bar.className='nse-bookmarklet-bar';
+      bar.style.cssText='margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px';
+      const pageLink=document.createElement('a');
+      pageLink.href='https://www.nseindia.com/all-reports';pageLink.target='_blank';pageLink.rel='noopener noreferrer';
+      pageLink.textContent='NSE All Reports';pageLink.style.cssText='color:var(--cyan);text-decoration:none';
+      const bmLink=document.createElement('a');
+      bmLink.href=NSE_REPORTS_BOOKMARKLET;bmLink.textContent='⬇ NSE Reports Bookmarklet';
+      bmLink.title='Drag to bookmarks bar or copy script to download the 11 NSE reports manually';
+      bmLink.style.cssText='color:var(--amber);text-decoration:none;font-weight:600';
+      const copyBtn=document.createElement('button');
+      copyBtn.type='button';copyBtn.className='btn';copyBtn.textContent='Copy script';
+      copyBtn.style.cssText='padding:3px 8px;font-size:12px';
+      copyBtn.onclick=()=>copyNseBookmarklet(copyBtn);
+      bar.append(pageLink,bmLink,copyBtn);
+      content.appendChild(bar);
     }
     if(!window._popoverClickListener){
       window._popoverClickListener=true;
