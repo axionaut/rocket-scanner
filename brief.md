@@ -1,10 +1,11 @@
-# Active Task: Deployed v1782 / Operational
+# Active Task: Deployed v1783 / Operational
 
-Rocket Scanner v1782 deployed at 2026-11-23 15:13 IST. System operational and in sync with origin/master.
+Rocket Scanner v1783 deployed at 2026-11-23 15:37 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1783:** Fix intraday vs delivery fees on carried same-day fills, fix paper BE+ stop gap execution & thin-ask sub-min buys, and clarify baseline subtitle
 - **v1782:** 1% pre-BE ratchet, BE+0.30% lock, coarse backup GTT sync, and tick dedup
 - **v1781:** Fix SELL IOC bridge, -0.1% GTT buffer, and 1-paisa tightening trail
 - **v1780:** Immediate 1% trailing SL to breakeven then ATR ratchet capped at 1% max trail
