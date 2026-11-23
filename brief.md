@@ -1,10 +1,11 @@
-# Active Task: Deployed v1777 / Operational
+# Active Task: Deployed v1779 / Operational
 
-Rocket Scanner v1777 deployed at 2026-11-23 11:19 IST. System operational and in sync with origin/master.
+Rocket Scanner v1779 deployed at 2026-11-23 11:46 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1779:** Restore helper tail, fix Saturday startup banner & timeouts, and align model comparison allocation
 - **v1778:** Fix false local helper blocked banner during warm-up and auto-clear on stream recovery
 - **v1777:** Fix AJMERA qty rounding down, statistical <1% ratchet max cap, TV Screener column spill, and helper CPU stalls
 - **v1776:** Fix helper event-loop freeze, top-bar input lag, and open-position Target display

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-23 11:19 IST'; // release build date (IST)
-const APP_VERSION=1777;
+const BUILD_TS='2026-11-23 11:46 IST'; // release build date (IST)
+const APP_VERSION=1779;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -704,22 +704,22 @@ const FS = (() => {
       _filterMirrors=mirrors||{};
     }catch(e){console.warn('Saved filter recovery could not be read; filter saving stays locked.',e);}
     updateFolderUI();
-    let recoveryState=null;
+    let recoveryState=null, helperOnlineForRecovery=true;
     const resetPending=Number(localStorage.getItem(PORTABLE_RESET_PENDING))||0;
-    if(resetPending) await flushPortableReset();
+    if(resetPending) helperOnlineForRecovery=await flushPortableReset();
     const stillPending=!!Number(localStorage.getItem(PORTABLE_RESET_PENDING));
     try{
       const r=await fetch(KITE_HELPER+'/api/recovery/browser-settings',{cache:'no-store',signal:AbortSignal.timeout(3000)});
       if(r.status===503){_portableRecoveryError=true;_filterMirrors=null;throw new Error('Saved browser recovery is unreadable');}
       if(r.ok&&!stillPending)recoveryState=(await r.json())?.state||null;
-    }catch(e){console.warn('Portable browser settings unavailable',e);}
+    }catch(e){if(_portableRecoveryError)throw e;helperOnlineForRecovery=false;console.warn('Portable browser settings unavailable',e);}
     let localBrain=await readLocalBrain();
     // A new browser has no IndexedDB. The helper can recover the brain included
     // in a downloaded folder before defaults are applied or saved.
-    if(!localBrain&&!stillPending){
+    if(!localBrain&&!stillPending&&helperOnlineForRecovery){
       let receivedSnapshot=false;
       try{
-        const r=await fetch(KITE_HELPER+'/api/recovery/brain',{cache:'no-store',signal:AbortSignal.timeout(10000)});
+        const r=await fetch(KITE_HELPER+'/api/recovery/brain',{cache:'no-store',signal:AbortSignal.timeout(4000)});
         if(r.ok){
           receivedSnapshot=true;
           const saved=await r.json();
@@ -730,10 +730,10 @@ const FS = (() => {
         }
       }catch(e){if(receivedSnapshot){_portableRecoveryError=true;_filterMirrors=null;}console.warn('Portable recovery brain unavailable',e);}
     }
-    if(!localBrain&&!stillPending&&!recoveryState?.resetAt){
+    if(!localBrain&&!stillPending&&!recoveryState?.resetAt&&helperOnlineForRecovery){
       let receivedBrain=false;
       try{
-        const r=await fetch(KITE_HELPER+'/api/inputs/file?name=rocket_brain.json',{cache:'no-store',signal:AbortSignal.timeout(10000)});
+        const r=await fetch(KITE_HELPER+'/api/inputs/file?name=rocket_brain.json',{cache:'no-store',signal:AbortSignal.timeout(4000)});
         if(r.ok){
           receivedBrain=true;
           const saved=await r.json();
@@ -17520,7 +17520,6 @@ function finishStartupUi(startupAt){
     document.getElementById('noDataBanner').style.display=ALL.length?'none':'flex';
   }catch(e){console.error('INIT step6 visibility failed:',e);}
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
-  try{renderLocalHelperAccessBanner();}catch(e){}
   setLoading(false);
   console.info('Startup ready ms:',Math.round(performance.now()-startupAt));
   schedulePerformanceRender();
