@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-21 17:02 IST'; // release build date (IST)
-const APP_VERSION=1775;
+const BUILD_TS='2026-11-23 09:39 IST'; // release build date (IST)
+const APP_VERSION=1776;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4868,11 +4868,40 @@ function applyPageLiveRank(p){
   BTST={...BTST,rank,data:rank,v:BTST.v+1,loadedAt:Date.now(),rankError:null};_btstRankMemo=null;
   return true;
 }
+let _topCtrlDeferredTimer=null;
+function isEditingTopControl(){
+  const ae=document.activeElement;
+  return !!(ae&&ae.closest&&ae.closest('#ctrlsPanel')&&/^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName));
+}
+if(typeof document!=='undefined'&&!window._ctrlsFocusoutBound){
+  window._ctrlsFocusoutBound=true;
+  document.addEventListener('focusout',e=>{
+    if(!e.target?.closest?.('#ctrlsPanel'))return;
+    clearTimeout(_topCtrlDeferredTimer);
+    _topCtrlDeferredTimer=setTimeout(()=>{
+      if(!isEditingTopControl()&&PAGE_LIVE.pendingAfterEdit){
+        PAGE_LIVE.pendingAfterEdit=false;
+        schedulePageLivePaint(PAGE_LIVE.checkAt,PAGE_LIVE.scoreDirty,PAGE_LIVE.replan);
+      }
+    },80);
+  });
+}
 function schedulePageLivePaint(checkAt,scoreChanged=true,replan=true){
   if(checkAt)PAGE_LIVE.checkAt=checkAt;
   PAGE_LIVE.scoreDirty=PAGE_LIVE.scoreDirty||scoreChanged;PAGE_LIVE.replan=PAGE_LIVE.replan||replan;
+  if(isEditingTopControl()){
+    PAGE_LIVE.pendingAfterEdit=true;
+    return;
+  }
   if(PAGE_LIVE.paint)return;
-  PAGE_LIVE.paint=setTimeout(runPageLivePaint,100);
+  PAGE_LIVE.paint=setTimeout(()=>{
+    if(isEditingTopControl()){
+      PAGE_LIVE.paint=null;
+      PAGE_LIVE.pendingAfterEdit=true;
+      return;
+    }
+    runPageLivePaint();
+  },100);
 }
 function runPageLivePaint(){
   clearTimeout(PAGE_LIVE.paint);PAGE_LIVE.paint=null;const start=performance.now();
@@ -5411,7 +5440,7 @@ function onScoreFloorChange(){
   let raw='';const model=floorModel();
   try{raw=document.getElementById('fScoreFloor')?.value??'';localStorage.setItem(scoreFloorStore(model),raw);}catch(e){}
   pushScoreFloorToEngine(raw,model);
-  if(typeof applyFilters==='function')applyFilters();
+  if(typeof scheduleApplyFilters==='function')scheduleApplyFilters();
 }
 // Why a symbol has no model score, in plain words. The engine publishes the exact exclusion per
 // symbol (price outside Rs 5-4,000, turnover under Rs 5 Cr, a >22% day in 60 sessions, short
@@ -8803,11 +8832,15 @@ function getTodayRupeeNeed(){
 }
 // Show each default in its field's placeholder so an empty field visibly reflects what the
 // calculation will use (grey = default in effect; a typed value = your override).
+let _tradeInputDebounce=null;
 function onTradeInputChange(){
-  // Persist the edit before the deferred filter pass or a refresh can restore old settings.
-  saveFilterState();
-  updateFilterPlaceholders();
-  scheduleApplyFilters();
+  clearTimeout(_tradeInputDebounce);
+  _tradeInputDebounce=setTimeout(()=>{
+    // Persist the edit before the deferred filter pass or a refresh can restore old settings.
+    saveFilterState();
+    updateFilterPlaceholders();
+    scheduleApplyFilters();
+  },220);
 }
 function showTradeInputMode(el,automaticLabel='Auto'){
   if(!el) return;
@@ -11840,7 +11873,7 @@ function getOpenPositionTapePolicy(sym,pos){
   if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
   const lossStop=plk?.lossGttId&&plk?.lossGttQty>0&&plk.lossGttQty<=qty&&plk?.lossGttTrigger>0?plk.lossGttTrigger:null;
-  const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
+  const targetPrice=avg>0&&tgtPct>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
       targetWhy:(activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`)+(plk?.bracketParams?`; upper gap ${plk.bracketParams.upperGapPct??plk.bracketParams.gapPct}%, lower gap ${plk.bracketParams.lowerGapPct??plk.bracketParams.gapPct}%, zone ${plk.bracketParams.zonePct}%`:''),stopWhy:lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from the today?s booked-profit budget`:slPct>0?`-${slPct}% from average buy cost`:'Loss trims wait for '+(plk?.lossCutoffPct>0?`a loss greater than ${plk.lossCutoffPct}%`:'the helper’s current cutoff')+' and the configured share of today?s booked profit after charges and losses',
@@ -12154,18 +12187,24 @@ function renderBasketSummary(){
   // update status bar — triggered via renderStatusBar, so leave it
 }
 
-function renderHead(){
+let _lastRenderHeadSig='';
+function renderHead(force=false){
   COLS=getCols(); // refresh in case ENGINE_DATA changed
-  const table=document.getElementById('tHead').closest('table');
-  table.classList.toggle('avwap-table',floorModel()==='AVWAP_CROSS'||floorModel()==='TV_SCREENER');
-  table.querySelector('colgroup[data-rank-layout]')?.remove();
-  if(floorModel()==='AVWAP_CROSS'){const group=document.createElement('colgroup');group.dataset.rankLayout='true';group.innerHTML=['96px','20%','auto','170px','130px','150px','110px','140px'].map(width=>'<col style="width:'+width+'">').join('');table.prepend(group);}
-  if(floorModel()==='TV_SCREENER'){const group=document.createElement('colgroup');group.dataset.rankLayout='true';group.innerHTML=['96px','18%','auto','150px','210px','220px','145px','145px'].map(width=>'<col style="width:'+width+'">').join('');table.prepend(group);}
+  const model=floorModel();
   const exportable=FILT.filter(isSelectableRecommendation);
   const allChecked=exportable.length>0&&exportable.every(s=>SELECTED.has(s.symbol));
   const someChecked=exportable.some(s=>SELECTED.has(s.symbol));
+  const sig=model+'|'+SCOL+'|'+SDIR+'|'+COLS.map(c=>c.key).join(',')+'|'+allChecked+'|'+someChecked+'|'+FILT.length;
+  const tHeadEl=document.getElementById('tHead');
+  if(!force&&sig===_lastRenderHeadSig&&tHeadEl&&tHeadEl.children.length)return;
+  _lastRenderHeadSig=sig;
+  const table=tHeadEl.closest('table');
+  table.classList.toggle('avwap-table',model==='AVWAP_CROSS'||model==='TV_SCREENER');
+  table.querySelector('colgroup[data-rank-layout]')?.remove();
+  if(model==='AVWAP_CROSS'){const group=document.createElement('colgroup');group.dataset.rankLayout='true';group.innerHTML=['96px','20%','auto','170px','130px','150px','110px','140px'].map(width=>'<col style="width:'+width+'">').join('');table.prepend(group);}
+  if(model==='TV_SCREENER'){const group=document.createElement('colgroup');group.dataset.rankLayout='true';group.innerHTML=['96px','18%','auto','150px','210px','220px','145px','145px'].map(width=>'<col style="width:'+width+'">').join('');table.prepend(group);}
   const timingBlocked=false; // the clock never disables selection (owner, v1068)
-  document.getElementById('tHead').innerHTML='<tr>'+COLS.map(c=>{
+  tHeadEl.innerHTML='<tr>'+COLS.map(c=>{
     if(c.key==='chk'){
       return`<th data-key="chk" style="width:32px;text-align:center;padding:8px 6px">
         <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
@@ -12184,7 +12223,7 @@ function renderHead(){
     return`<th data-key="${c.key}"${align} class="${activeSort?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
   }).join('')+'</tr>';
   // Drag-to-reorder columns; the saved order re-enters through getCols() (v536).
-  attachColDrag(document.getElementById('tHead').parentElement,'main-rankings',()=>{COLS=getCols();renderHead();renderTable();});
+  attachColDrag(tHeadEl.parentElement,'main-rankings',()=>{COLS=getCols();renderHead(true);renderTable();});
   // fix indeterminate state
   const sa=document.getElementById('chk-all');
   if(sa&&!allChecked&&someChecked)sa.indeterminate=true;
@@ -15419,14 +15458,16 @@ async function streamRefreshTick(){
     // Recompute when prices or tape changed, or periodically every 30s for clock-driven transitions.
     // Prices and the forming bar re-score their own rows in patchUniverseDeltas as they arrive; the
     // full cross-sectional pass runs when completed bars land and every 30 s for clock transitions.
-    const needScore = barsRead>0||(Date.now()-_lastScoreJobAt>=30000);
+    const editingTop=isEditingTopControl();
+    const needScore = !editingTop&&(barsRead>0||(Date.now()-_lastScoreJobAt>=30000));
     if(needScore){
       _lastScoreJobAt=Date.now();
       await scheduleScoreJob();
     }
     // scheduleScoreJob publishes its own filtered board. If another score job is still running,
     // publish this beat's safety/portfolio state now and let that job publish its final result later.
-    if(!needScore||_scoreJobRunning)applyFilters({preservePage:true});
+    if(editingTop)PAGE_LIVE.pendingAfterEdit=true;
+    else if(!needScore||_scoreJobRunning)applyFilters({preservePage:true});
     captureLiveRecommendationScan();
 
     const done=Date.now();
@@ -15451,11 +15492,11 @@ function refreshStrategySafety(){
   const now=Date.now(),open=isEquitySession(now);
   if(_streamConfirmed&&open&&universePriceStaleness())invalidateLiveEvidence('Live feed expired');
   // v1446: this re-evaluates all ~1,670 rows. Every second it blocked the main thread, so a native
-  // <select> (the Model dropdown) could not open until the scan finished. While a select is focused,
-  // skip the scan (the stale-feed invalidation above still runs); with the market closed nothing can
-  // become GO, so scan every 30 s instead of every second.
+  // <select> (the Model dropdown) could not open until the scan finished. While any top-bar input or
+  // <select> is focused, skip the scan (the stale-feed invalidation above still runs); with the market
+  // closed nothing can become GO, so scan every 30 s instead of every second.
   const ae=typeof document!=='undefined'?document.activeElement:null;
-  if(ae&&ae.tagName==='SELECT')return;
+  if(ae&&ae.tagName==='SELECT'||isEditingTopControl())return;
   if(!open&&now-(refreshStrategySafety.at||0)<30000)return;
   refreshStrategySafety.at=now;
   const states=ALL.map(r=>r.symbol+':'+getRowActionState(r).state).join('|');
@@ -17589,7 +17630,7 @@ function loadFilterState(){
     if(sharedTgt!=null){const el=document.getElementById('fTgtOverride');if(el)el.value=sharedTgt;}
     if(sharedRisk!=null){const el=document.getElementById('fRiskPerTrade');if(el)el.value=sharedRisk;}
     // Prime the change-gate so the first save after load doesn't needlessly rewrite the brain.
-    _lastTradeInputSig=JSON.stringify({capital:sharedCapital??'',minAllocPct:sharedMinAllocPct??'',tgtOverride:sharedTgt??'',riskPerTrade:sharedRisk??''});
+    _lastTradeInputSig=JSON.stringify({capital:sharedCapital??'',allocationMode:'score-proportional',tgtOverride:sharedTgt??'',riskPerTrade:sharedRisk??''});
     if(localNewer){
       FS.setUserSetting(TRADE_INPUTS_STORE,JSON.parse(_lastTradeInputSig));
       saveBrainInBackground();

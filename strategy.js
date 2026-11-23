@@ -1067,10 +1067,21 @@ function bookedSession(session,holdingCosts,tradebook){
   // First qualifying close above T-2 AVWAP, observed at completed 5m closes. No overnight comparison.
   function avwapCrossSignal(bars, session, anchor, now=Date.now(), bounds=null) {
     let ap=0,av=0,sp=0,sv=0,previous=null,last=null,priorDay=null,priorPv=0,priorVol=0,priorBar=null,prior2High=0;
-    const seen=new Set(),sessionBars=[];
-    for(const r of [...bars].sort((a,b)=>String(a[0]).localeCompare(String(b[0])))){
-      const key=String(r[0]),day=key.slice(0,10),end=Date.parse(key.replace(' ','T')+'+05:30')+300000;
-      if(day<anchor||day>session||end>now||seen.has(key))continue;
+    const seen=new Set(),sessionBars=[],filtered=[];
+    for(let i=0;i<bars.length;i++){
+      const r=bars[i],key=String(r[0]),day=key.slice(0,10);
+      if(day>=anchor&&day<=session)filtered.push(r);
+    }
+    filtered.sort((a,b)=>(a[0]<b[0]?-1:a[0]>b[0]?1:0));
+    const dayBaseMs=new Map();
+    for(let i=0;i<filtered.length;i++){
+      const r=filtered[i],key=String(r[0]),day=key.slice(0,10);
+      if(seen.has(key))continue;
+      let baseMs=dayBaseMs.get(day);
+      if(baseMs===undefined){baseMs=Date.parse(day+'T00:00:00+05:30');dayBaseMs.set(day,baseMs);}
+      const hh=+key.slice(11,13),mm=+key.slice(14,16);
+      const end=(Number.isFinite(hh)&&Number.isFinite(mm)&&key.length===16)?(baseMs+(hh*60+mm)*60000+300000):(Date.parse(key.replace(' ','T')+'+05:30')+300000);
+      if(end>now)continue;
       seen.add(key);
       const o=Number(r[1]),h=Number(r[2]),l=Number(r[3]),c=Number(r[4]),v=Number(r[5]),tp=(h+l+c)/3;
       if(!(v>=0&&tp>0&&o>0&&c>0&&h>=l&&Number.isFinite(v)&&Number.isFinite(tp)&&Number.isFinite(o)&&Number.isFinite(c)))return {triggered:false,reason:'Invalid OHLCV history'};

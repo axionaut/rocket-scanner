@@ -1,10 +1,11 @@
-# Active Task: Deployed v1775 / Operational
+# Active Task: Deployed v1776 / Operational
 
-Rocket Scanner v1775 deployed at 2026-11-21 17:02 IST. System operational and in sync with origin/master.
+Rocket Scanner v1776 deployed at 2026-11-23 09:39 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1776:** Fix helper event-loop freeze, top-bar input lag, and open-position Target display
 - **v1775:** Add live vs paper model comparison matrix tab
 - **v1774:** Fix brain backup timeout and report local save status
 - **v1773:** Move scanner temporary staging outside synced folders
