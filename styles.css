@@ -380,7 +380,7 @@ table.main.avwap-table td[data-key="symbol"]{overflow:hidden}
 table.main.avwap-table td[data-key="symbol"]>div{max-width:100%!important}
 
 /* Live & Paper Model Comparison Matrix (tab4) */
-.mc-wrap{max-width:1360px;margin:0 auto}
+.mc-wrap{width:100%;max-width:none;margin:0}
 .mc-hdr{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin-bottom:16px}
 .mc-title{font-size:18px;font-weight:800;color:var(--t1);display:flex;align-items:center;gap:10px}
 .mc-sub{font-size:13px;color:var(--t2);margin-top:3px}
@@ -403,6 +403,7 @@ table.mc-matrix tbody tr:last-child td{border-bottom:0}
 .mc-badge-paper{background:rgba(148,163,184,.14);color:var(--t2);border:1px solid rgba(148,163,184,.25)}
 .mc-rank{display:inline-block;font-size:11px;font-weight:800;padding:1px 6px;border-radius:5px;background:rgba(56,189,248,.14);color:var(--cyan);margin-left:6px}
 .mc-muted{color:var(--t3);font-size:12px;font-family:inherit}
+.mc-subline{display:block;font-size:11px;font-family:'Plus Jakarta Sans',sans-serif;color:var(--t3);margin-top:2px;font-weight:500}
 .mc-subgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}
 .mc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
 .mc-card h3{margin:0 0 10px;font-size:14px;font-weight:800;color:var(--t1);display:flex;justify-content:space-between;align-items:center}

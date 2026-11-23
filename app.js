@@ -1,4 +1,4 @@
-const BUILD_TS='2026-11-23 14:21 IST'; // release build date (IST)
+const BUILD_TS='2026-11-23 15:13 IST'; // release build date (IST)
 const APP_VERSION=1782;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
@@ -16793,11 +16793,11 @@ function renderModelComparison(){
   const sep=label=>`<tr class="mc-sep"><td colspan="${cols.length+1}">${escHtml(label)}</td></tr>`;
   const rowsHtml=[
     row('Execution Mode',c=>c.isLive?'<span style="color:var(--green);font-weight:700">LIVE ACCOUNT</span>':'<span style="color:var(--t2)">Paper Account</span>','Currently selected Active Strategy mirrors real Kite execution; others run independently with paper capital.'),
-    row('Signal Engine',c=>`<span style="color:${c.signalReady?'var(--green)':'var(--t2)'}" title="${escHtml(c.signalStatus||'')}">${escHtml(c.signalStatus||'—')}</span>`),
+    row('Signal Engine',c=>`<span style="color:${c.signalReady?'var(--green)':'var(--t2)'}" title="${escHtml(c.signalStatus||'')}">${escHtml(c.signalStatus||'—')}</span>`,'Eligible strategy signals passing hard filters; trades are still strictly limited and sized by free cash & position caps.'),
     sep('Capital & Return'),
     row('Starting Capital',c=>mcFmtRs(c.startingCapital),'Equal capital baseline captured from live equity (cash + holdings) at start.'),
     row('Current Equity',c=>`<strong style="color:var(--t1)">${mcFmtRs(c.equity)}</strong>`),
-    row('Free Cash',c=>mcFmtRs(c.cash)),
+    row('Free Cash',c=>c.isLive&&c.tradableCash!=null&&c.unsettledCash>=1?`${mcFmtRs(c.cash)}<span class="mc-subline">${mcFmtRs(c.tradableCash)} broker free · ${mcFmtRs(c.unsettledCash)} T+1 unsettled</span>`:mcFmtRs(c.cash),'Total uninvested cash + T+1 unsettled sale proceeds (broker tradable balance shown separately when holding sales are pending settlement).'),
     row('Deployed Capital',c=>mcFmtRs(c.deployedValue)),
     row('Total Net P&L',c=>`<strong style="color:${mcPnlColor(c.totalNet)}">${mcFmtRs(c.totalNet,true)} (${mcFmtPct(c.returnPct,true)})</strong>`,'Total mark-to-market change since comparison baseline after realized charges.'),
     row('Realized Net P&L',c=>`<span style="color:${mcPnlColor(c.realizedNet)}">${mcFmtRs(c.realizedNet,true)}</span>`),
