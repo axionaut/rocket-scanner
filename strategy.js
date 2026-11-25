@@ -1027,126 +1027,6 @@ function bookedSession(session,holdingCosts,tradebook){
     return null;
   }
 
-  // Upper-Wick Entry Guard (updated Nov 25 2026: R1 1m green-bar pause removed per 156-trade & 6-session data review):
-  // Empirically retain only actual 5m upper-wick exhaustion rules:
-  // 1) Reject if either of the last 2 completed 5m bars has upper wick >= 45% and live price still sits in [bodyTop*0.995, high*1.003].
-  // 2) Reject if the current forming 5m candle at live price has upper wick > 35%.
-  const ANTI_WICK_GUARD = Object.freeze({
-    minCompleted1m: 2,
-    prior5mLookback: 2,
-    prior5mWickMin: 0.45,
-    ceilBodyFloorPct: 0.995,
-    ceilHighCapPct: 1.003,
-    forming5mWickMax: 0.35
-  });
-  function normAntiWickBar(b, fallbackDay='') {
-    if(!b)return null;
-    let day='', min=NaN, o, h, l, c;
-    if(Array.isArray(b)){
-      const k=String(b[0]||'');
-      if(k.length>=16){day=k.slice(0,10);min=Number(k.slice(11,13))*60+Number(k.slice(14,16));}
-      o=Number(b[1]);h=Number(b[2]);l=Number(b[3]);c=Number(b[4]);
-    }else if(typeof b==='object'){
-      const bucket=String(b.bucket||'');
-      if(bucket.includes('#')){
-        const parts=bucket.split('#');
-        day=parts[0];min=Number(parts[1]);
-      }else{
-        const k=String(b.key||b.t||b.time||'');
-        if(k.length>=16&&k[10]===' '){day=k.slice(0,10);min=Number(k.slice(11,13))*60+Number(k.slice(14,16));}
-        else if(b.day&&Number.isFinite(Number(b.min))){day=String(b.day);min=Number(b.min);}
-      }
-      o=Number(b.o??b.open);h=Number(b.h??b.high);l=Number(b.l??b.low);c=Number(b.c??b.close);
-    }
-    if(!day||(fallbackDay&&day!==fallbackDay)||!Number.isFinite(min)||min<0||min>=1440)return null;
-    if(!(o>0&&h>0&&l>0&&c>0))return null;
-    const key=day+' '+String(Math.floor(min/60)).padStart(2,'0')+':'+String(min%60).padStart(2,'0');
-    return {day,min,key,o,h,l,c};
-  }
-  function antiWickEntryGuard(input) {
-    if(!input)return null;
-    const now=Number.isFinite(Number(input.now))?Number(input.now):Date.now();
-    const clk=nseClock(now);
-    const price=Number(input.price);
-    if(!(price>0))return null;
-    const openMin=nseSession(clk.day,null,input.symbol||null)?.open??555;
-    const byKey=new Map();
-    const pushCompleted=(raw)=>{
-      if(!Array.isArray(raw))return;
-      for(const item of raw){
-        const bar=normAntiWickBar(item,clk.day);
-        if(bar&&bar.min>=openMin&&bar.min<clk.minute)byKey.set(bar.key,bar);
-      }
-    };
-    pushCompleted(input.bars1m);
-    pushCompleted(input.pendingBars);
-    const completed1m=[...byKey.values()].sort((a,b)=>a.min-b.min);
-    if(completed1m.length<ANTI_WICK_GUARD.minCompleted1m)return null;
-
-    // Group completed 1m bars into 5m session slots strictly before the current forming 5m slot.
-    const curSlot=Math.floor((clk.minute-openMin)/5);
-    if(curSlot<0)return null;
-    const completed5mMap=new Map();
-    const forming5mBars=[];
-    for(const bar of completed1m){
-      const slot=Math.floor((bar.min-openMin)/5);
-      if(slot<0)continue;
-      if(slot<curSlot){
-        let g=completed5mMap.get(slot);
-        if(!g){g={slot,o:bar.o,h:bar.h,l:bar.l,c:bar.c};completed5mMap.set(slot,g);}
-        else{if(bar.h>g.h)g.h=bar.h;if(bar.l<g.l)g.l=bar.l;g.c=bar.c;}
-      }else if(slot===curSlot){
-        forming5mBars.push(bar);
-      }
-    }
-
-    // 2) Unabsorbed prior-2 5m upper-wick ceiling check.
-    const completed5m=[...completed5mMap.values()].sort((a,b)=>a.slot-b.slot);
-    const recent5m=completed5m.slice(-ANTI_WICK_GUARD.prior5mLookback);
-    for(const b5 of recent5m){
-      const rng=b5.h-b5.l;
-      if(!(rng>0))continue;
-      const bodyTop=Math.max(b5.o,b5.c);
-      const uw=(b5.h-bodyTop)/rng;
-      if(uw>=ANTI_WICK_GUARD.prior5mWickMin&&price>=bodyTop*ANTI_WICK_GUARD.ceilBodyFloorPct&&price<=b5.h*ANTI_WICK_GUARD.ceilHighCapPct){
-        return `Anti-wick guard: unabsorbed 5m upper-wick ceiling (${Math.round(uw*100)}% wick at ₹${bodyTop.toFixed(2)}–₹${b5.h.toFixed(2)})`;
-      }
-    }
-
-    // 3) Current forming 5m bar upper-wick cap at live price.
-    const fbBar=normAntiWickBar(input.fb,clk.day);
-    if(fbBar&&fbBar.min>=openMin&&fbBar.min<=clk.minute&&Math.floor((fbBar.min-openMin)/5)===curSlot){
-      const dupIdx=forming5mBars.findIndex(x=>x.min===fbBar.min);
-      if(dupIdx>=0)forming5mBars[dupIdx]=fbBar;
-      else forming5mBars.push(fbBar);
-      forming5mBars.sort((a,b)=>a.min-b.min);
-    }
-    if(forming5mBars.length){
-      const oLive=forming5mBars[0].o;
-      let hLive=price, lLive=price;
-      for(const b of forming5mBars){
-        if(b.h>hLive)hLive=b.h;
-        if(b.l<lLive)lLive=b.l;
-      }
-      const rngLive=hLive-lLive;
-      const uwLive=rngLive>0?(hLive-Math.max(oLive,price))/rngLive:0;
-      if(uwLive>ANTI_WICK_GUARD.forming5mWickMax){
-        return `Anti-wick guard: forming 5m upper wick ${Math.round(uwLive*100)}% (> ${Math.round(ANTI_WICK_GUARD.forming5mWickMax*100)}%)`;
-      }
-    }
-    return null;
-  }
-  function antiWickFromQuote(sessionBars, quote, price, now=Date.now(), symbol=null) {
-    const bars1m=Array.isArray(quote?.bars1m)?quote.bars1m:sessionBars;
-    return antiWickEntryGuard({
-      symbol: symbol||quote?.symbol||null,
-      bars1m,
-      pendingBars: quote?.pendingBars,
-      fb: quote?.fb,
-      price: Number(price)>0?Number(price):Number(quote?.price),
-      now
-    });
-  }
   // ChartIQ connects indicator samples at candle START timestamps. Attribute the
   // drawn intersection to that interval; detection still waits for the later close.
   const AVWAP_POLICY='avwap-t2-5m-v6-price-clv';
@@ -1297,8 +1177,6 @@ function bookedSession(session,holdingCosts,tradebook){
     if(!pick?.triggered||!source.crossings?.includes(sym)){
       return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting all 12 Buy/Strong Buy ratings + liquidity & 30m VWAP filters'};
     }
-    const wickWhy=antiWickFromQuote(null,quote,quote?.price,now,sym);
-    if(wickWhy)return {state:'WAIT',reason:wickWhy};
     return {state:'GO',score:1,dayPct:pick.dayPct??null,exitPolicy:TV_SCREENER_EXIT_POLICY,reason:pick.why};
   }
 
@@ -1314,7 +1192,7 @@ function bookedSession(session,holdingCosts,tradebook){
     applySelectedModel,AVWAP_POLICY,AVWAP_UPTREND_CANDLES,AVWAP_JUMP_BAND,AVWAP_ROOM_MIN_PCT,AVWAP_CLV_MIN,avwapChartCrossing,avwapVwapUptrend,avwapJumpPct,avwapJumpInBand,avwapBarClv,avwapRoomPct,avwapCrossSignal,avwapEntryState,
     TV_SCREENER_POLICY,TV_SCREENER_EXIT_POLICY,tvScreenerEntryState,
     entryScoreCapped,
-    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,ANTI_WICK_GUARD,antiWickEntryGuard,antiWickFromQuote,selectMemCandidates,memEntryState,memQuoteState,
+    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,
     CUM_REFINEMENT,
     cumRefinementReason,

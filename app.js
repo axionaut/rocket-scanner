@@ -1,4 +1,4 @@
-const BUILD_TS='2026-11-25 11:56 IST'; // release build date (IST)
+const BUILD_TS='2026-11-25 12:24 IST'; // release build date (IST)
 const APP_VERSION=1786;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
@@ -5615,25 +5615,26 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
   if(floorModel()==='MARKOV_3PCT'){
     const source=BTST.data,sym=normSym(s.symbol);
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     const decision=RocketStrategy.memEntryState(source,sym,_universeMap.get(s.symbol),Date.now());
     if(decision.state!=='GO')return decision;
-    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Position open today (awaiting exit)'};
     const price=Number(s.price),targetPct=currentModelTargetPct();
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
     return {...decision,targetPrice:+(price*(1+targetPct/100)).toFixed(2),stopPrice:null,targetPct,stopLossPct:0};
   }
   if(floorModel()==='AVWAP_CROSS'){
     const sym=normSym(s.symbol);
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     const decision=RocketStrategy.avwapEntryState(btstRanking()?.src,sym);
     if(decision.state!=='GO')return decision;
     const ready=RocketStrategy.memQuoteState(_universeMap.get(s.symbol),Date.now());
     if(ready.state!=='READY')return ready;
-    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Position open today (awaiting exit)'};
     const targetPct=currentModelTargetPct();
     return {...decision,targetPrice:+(s.price*(1+targetPct/100)).toFixed(2),stopPrice:null,targetPct,stopLossPct:0};
   }
   if(floorModel()==='MRMR'){
     const source=BTST.data||BTST.rank,sym=normSym(s.symbol);
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     if(!source||source.activeModel!=='MRMR'||!source.mrmr?.ok||source.mrmr.indicatorVersion!==RocketStrategy.MRMR_INDICATOR_VERSION){
       return {state:'WAIT',reason:source?.mrmr?.reason||'Awaiting Original mRMR prior-close return scores (218 features)'};
     }
@@ -5645,7 +5646,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(guardWhy)return {state:'WAIT',reason:guardWhy};
     const price=Number(s.price),targetPct=currentModelTargetPct();
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
-    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Position open today (awaiting exit)'};
     return {
       state:'GO',
       reason:`Original mRMR score ${score.toFixed(1)} >= ${floor} (${source.mrmr.learningStocks||0} prior-close learning stocks)`,
@@ -5658,6 +5658,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
   if(floorModel()==='TV_SCREENER'){
     const sym=normSym(s.symbol);
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     const src=btstRanking()?.src;
     if(!src||src.activeModel!=='TV_SCREENER'||!src.tvScreener?.ok){
       return {state:'WAIT',reason:src?.tvScreener?.progress?.reason||'Awaiting MTF Ratings Screener evaluation'};
@@ -5667,7 +5668,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(decision.state!=='GO')return {state:'WAIT',reason:decision.reason||detail?.reason||'Waiting for MTF Ratings Screener match'};
     const price=Number(s.price);
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
-    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Position open today (awaiting exit)'};
     return {
       ...decision,
       score:1,
@@ -12636,7 +12636,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'1st 5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':floorModel()==='TV_SCREENER'?'1m/5m/15m/1D Buy · RelVol>1.1 · Low30m>=VWAP · Sh>5k · Anti-wick':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators · Anti-wick':'Sequential filters and Ensemble ranking',spec:{exit:{policy:floorModel()==='TV_SCREENER'?'rs-sl1pct-atr-ratchet-v1':'rs-trail-min5-v2'}}};
+  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'1st 5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':floorModel()==='TV_SCREENER'?'1m/5m/15m/1D Buy · RelVol>1.1 · Low30m>=VWAP · Sh>5k':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:floorModel()==='TV_SCREENER'?'rs-sl1pct-atr-ratchet-v1':'rs-trail-min5-v2'}}};
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
@@ -12646,7 +12646,7 @@ function dashboardMarketCards(){
     const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'Native strategy';
     add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'}${floorModel()==='CUM'?' · Binary Pass/Fail':''}` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,floorModel()==='AVWAP_CROSS'?'Hard filters + 1st 5m close > T-2 AVWAP + 4-candle uptrend + 0.20%-0.60% jump + Room>0.8% + CLV>=0.75':floorModel()==='TV_SCREENER'?'All 12 MA/Osc/Tech ratings Buy/Strong Buy · Day % ascending · 5m upper-wick guard':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators) · 5m upper-wick guard':'Top-five positive Ensemble shortlist with live VWAP confirmation');
+    add(2,'NSE',`${go} GO`,floorModel()==='AVWAP_CROSS'?'Hard filters + 1st 5m close > T-2 AVWAP + 4-candle uptrend + 0.20%-0.60% jump + Room>0.8% + CLV>=0.75':floorModel()==='TV_SCREENER'?'All 12 MA/Osc/Tech ratings Buy/Strong Buy · Day % ascending':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
     if(floorModel()==='TV_SCREENER')add(3,'NSE','1% ratchet → BE lock','Ratchets up from entry; at BE tightens -0.005%/drop (min 0.01%) and locks BE at +0.30%');
@@ -15141,7 +15141,7 @@ function renderStatusBar(){
     const label=nse.error?'update failed':nse.busy?'checking':nse.reports?.length?`${nse.reports.length} reports${time?' | checked '+time+' IST':''}`:'awaiting download';
     bits.push(`<span style="color:var(--${nse.error?'amber':'t2'})" title="${escHtml(nse.error||'NSE reports download automatically at helper startup and every 15 minutes')}">NSE: ${escHtml(label)}</span>`);
   }
-  if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Currently held stocks in the universe (additional buys allowed up to Max position ₹ unless today's position is open).">📌 ${SUPPRESSED_HELD} held</span>`);
+  if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Currently held stocks in the universe (additional buys allowed up to Max position ₹ unless already bought this session).">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
   const bSum=lossBudgetSummary();
   if(bSum){
