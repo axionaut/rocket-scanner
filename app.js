@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-25 20:07 IST'; // release build date (IST)
-const APP_VERSION=1794;
+const BUILD_TS='2026-11-25 21:30 IST'; // release build date (IST)
+const APP_VERSION=1795;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5985,7 +5985,7 @@ function tvScreenerCell(s,key){
 function exitCellHtml(s){
   const p=PROFIT_LOCK_STATUS.bySym.get(normSym(s.symbol));
   if(!p||!(p.qty>0)){
-    if(floorModel()==='TV_SCREENER')return '<span style="color:var(--t3)" title="Profit-funded exit: no below-BE full sell; arms BE/1% ratchet at breakeven (-0.005%/drop tighten, min 0.01%); ₹5K dip top-up per -0.5%">Profit-funded → BE ratchet</span>';
+    if(floorModel()==='TV_SCREENER')return '<span style="color:var(--t3)" title="The 1% SL ratchets normally; a loss-bearing sale requires reserved booked profit">1% ratchet · funded loss</span>';
     return '<span style="color:var(--t3)">—</span>';
   }
   const sl=Number(p.stopGttTrigger),a=p.bracket?.atr;
@@ -5999,8 +5999,8 @@ function exitCellHtml(s){
     const displaySl=isSl1&&Number(p.bracket?.lower)>sl?Number(p.bracket.lower):sl;
     return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="${detail}; stop only moves upward"><span style="color:var(--red)">SL ₹${displaySl.toFixed(2)}</span> <span style="color:var(--t3)">(${mode})</span></div>`;
   }
-  if(p.lossFundingRequired&&!p.lossGttId)return '<span style="color:var(--t3)">Loss exit requires profit funding</span>';
-  if(p.lossGttId)return '<span style="color:var(--amber)">Partial trim protection</span>';
+  if(p.lossGttId&&p.lossGttQty>0&&p.lossGttTrigger>0&&!p.needsReconcile&&!p.lossUpdatePending)return `<span style="color:var(--amber)" title="Broker GTT covers ${p.lossGttQty} of ${p.qty} shares; its loss is reserved from booked profit">Funded SL ₹${Number(p.lossGttTrigger).toFixed(2)} · ${p.lossGttQty}/${p.qty}</span>`;
+  if(p.lossFundingRequired&&!p.lossGttId){const local=Number(p.bracket?.proposedLower);return `<span style="color:var(--t3)" title="Local SL only; no broker loss stop confirmed">${local>0?'SL ₹'+local.toFixed(2)+' · ':''}awaiting funding</span>`;}
   return '<span style="color:var(--red)" title="'+(p.protectionPending||'Awaiting broker confirmation')+'">SL pending · '+(p.exitPolicy==='rs-sl1pct-atr-ratchet-v1'?'-1% SL':(p.bracket?.atr?'broker confirmation':'5m ATR'))+'</span>';
 }
 function radarSetupLabel(r){
@@ -9167,7 +9167,7 @@ function lossBudgetSummary(plk=PROFIT_LOCK_STATUS){
   const cutoff=Number(lb.triggerPct);
   const activeTrims=[...(plk.bySym?.values()||[])].filter(p=>p&&p.lossGttId&&p.lossGttQty>0);
   const activeText=activeTrims.length?activeTrims.map(p=>`${p.sym} ×${p.lossGttQty}${p.lossGttTrigger>0?' @ ₹'+p.lossGttTrigger:''}`).join(', '):'none armed';
-  const tip=`Profit-funded trim pool (today only, ${sharePct}% share${cutoff>0?`, -${cutoff}% cutoff`:''}):\nToday wins: ${fmtSignedINR(wins)} | Base pool: ${fmtSignedINR(baseNet)}\nToday losses: ${fmtINR(losses)} | Active GTT reserve: ${fmtINR(res)} (${activeText}) | Cushion: ${fmtINR(reserve)}\nRemaining budget: ${fmtINR(avail)}`;
+  const tip=`Profit-funded SL budget (today only, ${sharePct}% share):\nToday wins: ${fmtSignedINR(wins)} | Base pool: ${fmtSignedINR(baseNet)}\nToday losses: ${fmtINR(losses)} | Active reservations: ${fmtINR(res)} (${activeText}) | Cushion: ${fmtINR(reserve)}\nRemaining budget: ${fmtINR(avail)}`;
   return {sharePct,avail,res,reserve,wins,losses,net5,baseNet,priorNet,cutoff,activeTrims,activeText,tip};
 }
 function renderStats(){
@@ -10155,7 +10155,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker bracket and profit-funded partial loss trims using the current learned cutoff (initially -1.25%). No holding-age deadline. Exit advice requires fresh live prices. During the session, the helper checks positions every 10 seconds and refreshes on order updates, even with this page closed. ${escHtml(bracketLearningStatusText())}.</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Each position's SL ratchets normally; loss-bearing exits require reserved booked profit. Broker-confirmed stops show their covered quantity. No holding-age deadline. Exit advice requires fresh live prices. During the session, the helper checks positions every 10 seconds and refreshes on order updates, even with this page closed. ${escHtml(bracketLearningStatusText())}.</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -11892,11 +11892,11 @@ function getOpenPositionTapePolicy(sym,pos){
   const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:pending?{action:'WAIT',reason:pos?.basisKnown===false?'Position cost is awaiting execution reconciliation.':plk?.triggered?'Broker exit triggered; awaiting fill or cleanup.':'Broker profit protection is being reconciled.',shouldExit:false}:RocketStrategy.evaluateExit({bracket:!plk?.runner,bracketLower:brokerStop,avgCost:avg,daysHeld:days,targetPct:tgtPct,targetPrice:activeTarget,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?brokerStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered?brokerStop:null},price);
   if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
-  const lossStop=plk?.lossGttId&&plk?.lossGttQty>0&&plk.lossGttQty<=qty&&plk?.lossGttTrigger>0?plk.lossGttTrigger:null;
-  const targetPrice=avg>0&&tgtPct>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
+  const lossStop=plk?.lossGttId&&!plk.needsReconcile&&!plk.lossUpdatePending&&plk?.lossGttQty>0&&plk.lossGttQty<=qty&&plk?.lossGttTrigger>0?plk.lossGttTrigger:null;
+  const targetPrice=avg>0&&tgtPct>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||brokerStop||null;
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
-      targetWhy:(activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`)+(plk?.bracketParams?`; upper gap ${plk.bracketParams.upperGapPct??plk.bracketParams.gapPct}%, lower gap ${plk.bracketParams.lowerGapPct??plk.bracketParams.gapPct}%, zone ${plk.bracketParams.zonePct}%`:''),stopWhy:lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from the today?s booked-profit budget`:slPct>0?`-${slPct}% from average buy cost`:'Loss trims wait for '+(plk?.lossCutoffPct>0?`a loss greater than ${plk.lossCutoffPct}%`:'the helper’s current cutoff')+' and the configured share of today?s booked profit after charges and losses',
+      targetWhy:(activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`)+(plk?.bracketParams?`; upper gap ${plk.bracketParams.upperGapPct??plk.bracketParams.gapPct}%, lower gap ${plk.bracketParams.lowerGapPct??plk.bracketParams.gapPct}%, zone ${plk.bracketParams.zonePct}%`:''),stopWhy:lossStop?`Profit-funded SL GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; projected loss and charges reserved from today's booked-profit budget`:'SL ratchets locally; a loss-bearing sell requires available booked-profit funding and broker confirmation',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null,
     profitLock:plk||null,lockStopPrice:verdict.lockStopPrice||null};
 }
@@ -15150,7 +15150,7 @@ function renderStatusBar(){
   const bSum=lossBudgetSummary();
   if(bSum){
     const trimCol=bSum.avail>=50?'var(--amber)':bSum.res>0?'var(--cyan)':'var(--t3)';
-    const trimLabel=bSum.activeTrims.length?`✂️ ${escHtml(bSum.activeTrims[0].sym)} ×${bSum.activeTrims[0].lossGttQty} (${fmtINR(bSum.avail)} left)`:`✂️ trim budget ${fmtINR(bSum.avail)}`;
+    const trimLabel=bSum.activeTrims.length?`✂️ ${bSum.activeTrims.length} funded SL${bSum.activeTrims.length===1?'':'s'} (${fmtINR(bSum.avail)} left)`:`✂️ SL budget ${fmtINR(bSum.avail)}`;
     bits.push(`<span style="color:${trimCol}" title="${escHtml(bSum.tip)}">${trimLabel}</span>`);
   }
   if(KITE_MARGINS.unknownReserved>0){

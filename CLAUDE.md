@@ -1,5 +1,7 @@
 > Current owner scope (12 November 2026): StratGen is retired and removed from the active system. Historical notes below describe earlier releases and are not active requirements. The selected NSE engine is the sequential Markov ? causal mRMR ? five-member Ensemble funnel. Shared account allocation, loss ledger and trailing protection remain active independently of retired research features. Helper health uses `/api/health`.
 
+Owner exit update (25 November 2026): Each position's existing SL ratchets independently of funding. A loss-bearing stop may be armed or sold only for the quantity covered by today's unreserved booked-profit allowance at the sell limit including charges. Funding alone never sells; after an unfunded crossing the unchanged stop waits for recovery and a fresh crossing. Broker GTT and browser IOC reservations survive ambiguous writes and are released after terminal broker and ledger reconciliation. Funded loss GTTs are retired after the session because profit funding does not carry over; an offline helper or failed cancellation leaves broker status unconfirmed. The separate worst-position cash-refill trim and its cutoff are retired; older exit descriptions below are historical. Paper comparison and account replay model the same funded-stop rule, with observed-price/depth limitations.
+
 Owner workflow update (13 November 2026). Work directly unless the owner explicitly requests delegation.
 
 # Rocket Scanner — Live System Spec & Release Runbook
@@ -7,7 +9,7 @@ Owner workflow update (13 November 2026). Work directly unless the owner explici
 This document is the single source of truth for how Rocket Scanner works **today**: architecture, trading rules and the release workflow. Keep it current: when a release changes behaviour, edit the section it changes; do not append a changelog here.
 
 
-Current version: **v1794** (2026-11-25). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
+Current version: **v1795** (2026-11-25). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
 
 StratGen research controls read only the current form: fixed shared_rs exits, selected history and auto-refine. Removed target/horizon controls are never accessed; older saved controls retain their supported history and auto-refine values, and running-job display uses the shared-exit summary. SDL is verified through its actual UI start handler into a live research worker.
 

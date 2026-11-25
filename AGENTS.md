@@ -124,3 +124,11 @@
 - Remove all unrestricted full-position below-breakeven ATR GTTs introduced by the migration, including new buys. Preserve legitimate budgeted partial trims and confirmed profitable protection.
 - ATR may propose and track a stop locally; a full-position GTT can only be written when its trigger and execution limit cover charges/breakeven. Otherwise existing profit-funded trim authorization remains authoritative. Zero funding means no loss-bearing sell authorization.
 - Do not reset booked losses or rebuy positions as part of this correction. This supersedes earlier unrestricted ATR initial-stop and old/new distinctions.
+
+## Profit-funded ratcheting SL - owner, 25 November 2026
+
+- Every position retains its existing upward-only SL ratchet, independent of whether booked-profit funding is currently available. Funding makes a loss-bearing stop eligible; it does not select the worst position or cause an immediate sale by itself.
+- When funding arrives after an unfunded stop crossing, preserve the tracked SL and wait for price to recover above it and cross again. Never create an immediately triggered GTT or backdate a sale.
+- Reserve today's available booked-profit allowance against the proposed sell limit and estimated charges before authorizing either a broker GTT or browser IOC. Cover only the number of shares the reservation supports, including the full position when affordable. Preserve reservations through uncertain writes and until terminal broker evidence and ledger reconciliation.
+- This replaces the separate worst-position cash-refill trim and its loss cutoff; each position follows its own SL. Opportunity-swap rules remain separate. A local SL is not broker-confirmed protection, and a triggered limit order may remain unfilled.
+- Today-only funding expires across sessions: retire funded loss GTTs after the session and reconcile any earlier-session stop before reuse. An offline helper or failed broker cancellation cannot guarantee overnight removal; expose the pending protection state.

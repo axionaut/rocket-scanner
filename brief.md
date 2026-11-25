@@ -1,10 +1,11 @@
-# Active Task: Deployed v1794 / Operational
+# Active Task: Deployed v1795 / Operational
 
-Rocket Scanner v1794 deployed at 2026-11-25 20:07 IST. System operational and in sync with origin/master.
+Rocket Scanner v1795 deployed at 2026-11-25 21:30 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1795:** Gate each ratcheting stop by booked-profit funding
 - **v1794:** Sort Price-Day column by day change percentage
 - **v1793:** Retry strategy.js load instead of booting app.js without RocketStrategy
 - **v1792:** Restore immediate MTF re-entry after position closes
