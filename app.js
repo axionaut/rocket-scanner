@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-25 13:11 IST'; // release build date (IST)
-const APP_VERSION=1789;
+const BUILD_TS='2026-11-25 14:05 IST'; // release build date (IST)
+const APP_VERSION=1790;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4034,7 +4034,7 @@ function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
   if(floorModel()==='AVWAP_CROSS')return 'Binary entry: 1st completed 5m close crossing above HLC/3 AVWAP anchored at T-2 session open on 4 contiguous rising candles, 0.20%-0.60% VWAP jump, >0.8% room to T-2/T-1 high, and candle CLV >= 0.75. First and last candles excluded.';
-  if(floorModel()==='TV_SCREENER')return `MTF Ratings Screener: 1m/5m/15m/1D MA, Oscillator & Tech ratings all Buy/Strong Buy, Price 25-${getScreenerMaxPrice()}, Price*Vol > 5M, RelVol > 1.1, Shareholders > 5k, Low 30m >= VWAP. Sorted Day % ascending; fixed -1% SL until current ATR ratchet arms.`;
+  if(floorModel()==='TV_SCREENER')return `MTF Ratings Screener: 1m/5m/15m/1D MA, Oscillator & Tech ratings all Buy/Strong Buy, Price 25-${getScreenerMaxPrice()}, Price*Vol > 5 Cr, RelVol > 1.1, Shareholders > 5k, Low 30m >= VWAP. Sorted Day % ascending; fixed -1% SL until current ATR ratchet arms.`;
   if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
@@ -5662,7 +5662,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
   if(floorModel()==='TV_SCREENER'){
     const sym=normSym(s.symbol);
-    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Already bought this session'};
     const src=btstRanking()?.src;
     if(!src||src.activeModel!=='TV_SCREENER'||!src.tvScreener?.ok){
       return {state:'WAIT',reason:src?.tvScreener?.progress?.reason||'Awaiting MTF Ratings Screener evaluation'};
@@ -5672,6 +5671,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(decision.state!=='GO')return {state:'WAIT',reason:decision.reason||detail?.reason||'Waiting for MTF Ratings Screener match'};
     const price=Number(s.price);
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Position open today (awaiting exit)'};
     return {
       ...decision,
       score:1,
@@ -12640,7 +12640,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'1st 5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':floorModel()==='TV_SCREENER'?'1m/5m/15m/1D Buy · RelVol>1.1 · Low30m>=VWAP · Sh>5k':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:floorModel()==='TV_SCREENER'?'rs-sl1pct-atr-ratchet-v1':'rs-trail-min5-v2'}}};
+  const dep = {name:btstModelName(floorModel()),archetype:floorModel()==='AVWAP_CROSS'?'1st 5m close > T-2 AVWAP · Room>0.8% · CLV>=0.75':floorModel()==='TV_SCREENER'?'1m/5m/15m/1D Buy · >5 Cr · RelVol>1.1 · Low30m>=VWAP · Sh>5k':floorModel()==='CUM'?'VWAP acceleration 3x + trend + breadth':floorModel()==='MRMR'?'Prior-close return learning across 218 indicators':'Sequential filters and Ensemble ranking',spec:{exit:{policy:floorModel()==='TV_SCREENER'?'rs-sl1pct-atr-ratchet-v1':'rs-trail-min5-v2'}}};
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
@@ -15136,7 +15136,7 @@ function renderStatusBar(){
     const ready=tvs?.ok===true&&age>=0&&age<=180000;
     const shCnt=tvs?.shareholders?.cachedCount??0;
     const scoreStatus=tvs?.ok?`${tvs.counts?.passed??0} passed · 12/12: ${tvs.counts?.ratings12??0} · Sh:${shCnt}`:(tvs?.progress?.reason||'Warming screener state…');
-    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(tvs?.progress?.reason||'MTF Ratings Screener (1m/5m/15m/1D Buy + RelVol>1.1 + 30m Low>=VWAP + Sh>5k)')}">MTF Screener: ${escHtml(scoreStatus)}</span>`);
+    bits.push(`<span style="color:var(--${ready?'green':'amber'})" title="${escHtml(tvs?.progress?.reason||'MTF Ratings Screener (1m/5m/15m/1D Buy + Price×Vol>5 Cr + RelVol>1.1 + 30m Low>=VWAP + Sh>5k)')}">MTF Screener: ${escHtml(scoreStatus)}</span>`);
   }
   if(NSE_REPORTS_STATUS){
     const nse=NSE_REPORTS_STATUS;
@@ -15145,7 +15145,7 @@ function renderStatusBar(){
     const label=nse.error?'update failed':nse.busy?'checking':nse.reports?.length?`${nse.reports.length} reports${time?' | checked '+time+' IST':''}`:'awaiting download';
     bits.push(`<span style="color:var(--${nse.error?'amber':'t2'})" title="${escHtml(nse.error||'NSE reports download automatically at helper startup and every 15 minutes')}">NSE: ${escHtml(label)}</span>`);
   }
-  if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Currently held stocks in the universe (additional buys allowed up to Max position ₹ unless already bought this session).">📌 ${SUPPRESSED_HELD} held</span>`);
+  if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Currently held stocks in the universe (additional buys allowed up to Max position ₹ unless today's position is open).">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
   const bSum=lossBudgetSummary();
   if(bSum){

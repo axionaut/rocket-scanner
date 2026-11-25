@@ -1,10 +1,11 @@
-# Active Task: Deployed v1789 / Operational
+# Active Task: Deployed v1790 / Operational
 
-Rocket Scanner v1789 deployed at 2026-11-25 13:11 IST. System operational and in sync with origin/master.
+Rocket Scanner v1790 deployed at 2026-11-25 14:05 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1790:** Raise MTF turnover to 5 Cr, expand warmup to 30 sessions, allow closed-stock re-entry, and timestamp helper logs
 - **v1789:** Fix notification bursts, bridge tab contention, duplicate GTT/SL triggers, and 1-share dip top-ups
 - **v1788:** Enforce strictly monotonic upward-only SL/ATR ratchets below breakeven and log only strict increases
 - **v1787:** Show live server SL ratchet logs below/above breakeven, sync Kite GTTs on upward moves, and enforce monotonic release version
