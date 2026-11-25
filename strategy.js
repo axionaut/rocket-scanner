@@ -1027,11 +1027,10 @@ function bookedSession(session,holdingCosts,tradebook){
     return null;
   }
 
-  // Post-Pause Anti-Wick Entry Guard (owner, Nov 25 2026):
-  // Empirically validated across >= 20 Nov 2026 trades to avoid buying climax peaks and 5m upper-wick traps:
-  // 1) Require a red/flat most recent completed 1m session bar (up1Strict === 0).
-  // 2) Reject if either of the last 2 completed 5m bars has upper wick >= 45% and live price still sits in [bodyTop*0.995, high*1.003].
-  // 3) Reject if the current forming 5m candle at live price has upper wick > 35%.
+  // Upper-Wick Entry Guard (updated Nov 25 2026: R1 1m green-bar pause removed per 156-trade & 6-session data review):
+  // Empirically retain only actual 5m upper-wick exhaustion rules:
+  // 1) Reject if either of the last 2 completed 5m bars has upper wick >= 45% and live price still sits in [bodyTop*0.995, high*1.003].
+  // 2) Reject if the current forming 5m candle at live price has upper wick > 35%.
   const ANTI_WICK_GUARD = Object.freeze({
     minCompleted1m: 2,
     prior5mLookback: 2,
@@ -1083,17 +1082,6 @@ function bookedSession(session,holdingCosts,tradebook){
     pushCompleted(input.pendingBars);
     const completed1m=[...byKey.values()].sort((a,b)=>a.min-b.min);
     if(completed1m.length<ANTI_WICK_GUARD.minCompleted1m)return null;
-
-    // 1) Post-pause check: never buy right after >= 1 consecutive strictly-green 1m bar.
-    const last1m=completed1m[completed1m.length-1];
-    if(last1m.c>last1m.o){
-      let streak=0;
-      for(let i=completed1m.length-1;i>=0;i--){
-        if(completed1m[i].c>completed1m[i].o)streak++;
-        else break;
-      }
-      return `Anti-wick guard: ${streak} consecutive green 1m bar(s); awaiting red/flat 1m pause`;
-    }
 
     // Group completed 1m bars into 5m session slots strictly before the current forming 5m slot.
     const curSlot=Math.floor((clk.minute-openMin)/5);
