@@ -119,36 +119,38 @@
     window.close();
     return;
   }
-  var cacheKey = Date.now().toString(36);
-  var stratScript = document.createElement('script');
-  stratScript.id = 'strategyScript';
-  stratScript.async = false;
-  stratScript.src = 'strategy.js?cb=' + cacheKey;
-  stratScript.onload = function() {
-    var script = document.createElement('script');
-    script.id = 'appScript';
-    script.async = false;
-    script.src = 'app.js?cb=' + cacheKey;
-    script.dataset.cacheKey = cacheKey;
-    // The Finance tab loads after app.js; each is independent, so one failing never stops the app.
-    script.onload = function() {
-      ['finance.js'].forEach(function (f) {
-        var s = document.createElement('script'); s.async = false; s.src = f + '?cb=' + cacheKey;
-        s.onerror = function () { console.error('Failed to load ' + f); };
-        document.head.appendChild(s);
-      });
-    };
-    document.head.appendChild(script);
+  var baseKey = Date.now().toString(36);
+  var loadScript = function(src, id, onLoad, onError) {
+    var s = document.createElement('script');
+    if (id) s.id = id;
+    s.async = false;
+    s.src = src;
+    if (onLoad) s.onload = onLoad;
+    if (onError) s.onerror = onError;
+    document.head.appendChild(s);
   };
-  stratScript.onerror = function() {
-    console.error('Failed to load strategy.js');
-    var script = document.createElement('script');
-    script.id = 'appScript';
-    script.async = false;
-    script.src = 'app.js?cb=' + cacheKey;
-    document.head.appendChild(script);
+  var bootApp = function(cb) {
+    loadScript('app.js?cb=' + cb, 'appScript', function() {
+      loadScript('finance.js?cb=' + cb, null, null, function() { console.error('Failed to load finance.js'); });
+    });
   };
-  document.head.appendChild(stratScript);
+  var loadStrategy = function(attempt) {
+    var cb = attempt === 0 ? baseKey : (baseKey + 'r' + attempt);
+    var src = attempt >= 3 ? 'strategy.js' : ('strategy.js?cb=' + cb);
+    loadScript(src, 'strategyScript', function() {
+      if (typeof window.RocketStrategy !== 'undefined') { bootApp(baseKey); return; }
+      if (attempt < 3) { setTimeout(function() { loadStrategy(attempt + 1); }, 350 * (attempt + 1)); return; }
+      console.error('RocketStrategy missing after loading ' + src);
+    }, function() {
+      console.error('Failed to load strategy.js (attempt ' + (attempt + 1) + ')');
+      if (attempt < 3) { setTimeout(function() { loadStrategy(attempt + 1); }, 350 * (attempt + 1)); }
+      else {
+        var b = document.getElementById('statusBar');
+        if (b) b.innerHTML = '<span style="color:#f87171">Failed to load strategy.js — click Refresh to retry.</span>';
+      }
+    });
+  };
+  loadStrategy(0);
 })();
 </script>
 
