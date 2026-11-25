@@ -1,10 +1,11 @@
-# Active Task: Deployed v1791 / Operational
+# Active Task: Deployed v1792 / Operational
 
-Rocket Scanner v1791 deployed at 2026-11-25 14:50 IST. System operational and in sync with origin/master.
+Rocket Scanner v1792 deployed at 2026-11-25 15:01 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1792:** Restore immediate MTF re-entry after position closes
 - **v1791:** Require post-exit signal reset (<12/12) before MTF same-day re-entry
 - **v1790:** Raise MTF turnover to 5 Cr, expand warmup to 30 sessions, allow closed-stock re-entry, and timestamp helper logs
 - **v1789:** Fix notification bursts, bridge tab contention, duplicate GTT/SL triggers, and 1-share dip top-ups

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-25 14:50 IST'; // release build date (IST)
-const APP_VERSION=1791;
+const BUILD_TS='2026-11-25 15:01 IST'; // release build date (IST)
+const APP_VERSION=1792;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5671,10 +5671,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(decision.state!=='GO')return {state:'WAIT',reason:decision.reason||detail?.reason||'Waiting for MTF Ratings Screener match'};
     const price=Number(s.price);
     if(!(price>0))return {state:'WAIT',reason:'Awaiting current executable price'};
-    if(AUTO_BUY_STATUS?.executedToday?.includes(sym)){
-      const heldOpen=(Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0)>0;
-      return {state:'WAIT',reason:heldOpen?'Position open today (awaiting exit)':'Awaiting signal reset (< 12/12) before same-day re-entry'};
-    }
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym))return {state:'WAIT',reason:'Position open today (awaiting exit)'};
     return {
       ...decision,
       score:1,
