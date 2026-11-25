@@ -1,10 +1,11 @@
-# Active Task: Deployed v1787 / Operational
+# Active Task: Deployed v1788 / Operational
 
-Rocket Scanner v1787 deployed at 2026-11-25 12:36 IST. System operational and in sync with origin/master.
+Rocket Scanner v1788 deployed at 2026-11-25 12:52 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1788:** Enforce strictly monotonic upward-only SL/ATR ratchets below breakeven and log only strict increases
 - **v1787:** Show live server SL ratchet logs below/above breakeven, sync Kite GTTs on upward moves, and enforce monotonic release version
 - **v1786:** Remove 1m green-bar pause from Anti-Wick guard and allow same-session re-entry once position closes
 - **v1785:** Add 0.35% backup GTT headroom, pre-mutation 0.25% rejection recovery, and ATR ratchet IOC exits
