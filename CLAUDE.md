@@ -7,7 +7,7 @@ Owner workflow update (13 November 2026). Work directly unless the owner explici
 This document is the single source of truth for how Rocket Scanner works **today**: architecture, trading rules and the release workflow. Keep it current: when a release changes behaviour, edit the section it changes; do not append a changelog here.
 
 
-Current version: **v1793** (2026-11-25). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
+Current version: **v1794** (2026-11-25). Release history (v1386 onward, research notes) lives in local [docs/RELEASE_HISTORY.md](docs/RELEASE_HISTORY.md); v1-v1385 in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md). This file describes only how the system stands now.
 
 StratGen research controls read only the current form: fixed shared_rs exits, selected history and auto-refine. Removed target/horizon controls are never accessed; older saved controls retain their supported history and auto-refine values, and running-job display uses the shared-exit summary. SDL is verified through its actual UI start handler into a live research worker.
 
@@ -203,7 +203,7 @@ First-crossing badge (v1548): score-run timestamp plus captured price and signed
 
 
 
-Table sorting (v1568): every ranking data header is clickable, including Buyer/Seller (buyer share), Target and Alloc. Display rows, including US suggestions, share the selected comparator before pagination. Score clicks sort the actual numeric score both ways, independent of the default floor-nearest display for trained models. Explicit sort choice/direction is saved. Plain tables across Performance, Finance, broker panels and methodology use delegated header sorting with currency/grouping/unit/date/time parsing, missing values last, and totals preserved. Generic sort direction survives live table replacement using only explicitly sorted tables; dedicated sortable-table renderers retain their own handlers.
+Table sorting (v1568): every ranking data header is clickable, including Buyer/Seller (buyer share), Target and Alloc. Display rows, including US suggestions, share the selected comparator before pagination. The Price / Day column sorts by the displayed day-change percentage for every model. Score clicks sort the actual numeric score both ways, independent of the default floor-nearest display for trained models. Explicit sort choice/direction is saved. Plain tables across Performance, Finance, broker panels and methodology use delegated header sorting with currency/grouping/unit/date/time parsing, missing values last, and totals preserved. Generic sort direction survives live table replacement using only explicitly sorted tables; dedicated sortable-table renderers retain their own handlers.
 
 Cumulative Floor number-input step is 0.1 (owner v1568); no min/max.
 

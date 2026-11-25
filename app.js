@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-25 15:13 IST'; // release build date (IST)
-const APP_VERSION=1793;
+const BUILD_TS='2026-11-25 20:07 IST'; // release build date (IST)
+const APP_VERSION=1794;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12970,7 +12970,7 @@ function sortValueOf(row,key){
   if(key==='depth')return row._us?null:tableCellSortValue({textContent:strategySignalCells(row).depth});
   if(key==='tgt')return row._us?num(row.tgtPct):num(getRowExitPolicy(row,getBuyPrice(row)).targetPct);
   if(key==='turnover'&&row._us)return num(row.turnover20);
-  if(key==='price') return num(row.price);
+  if(key==='price') return num(row._us?row.chgPct:row.day??row.priceChange);
   if(key==='relvol') return num(RocketStrategy.inputs(row).rvol);
   const v=row[key];
   if(v===null||v===undefined||v==='') return null;
