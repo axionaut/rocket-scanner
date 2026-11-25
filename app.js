@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-25 12:52 IST'; // release build date (IST)
-const APP_VERSION=1788;
+const BUILD_TS='2026-11-25 13:11 IST'; // release build date (IST)
+const APP_VERSION=1789;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1679,7 +1679,11 @@ const plainTableSortObserver=new MutationObserver(changes=>{
 plainTableSortObserver.observe(document.body,{childList:true,subtree:true});
 
 // ── Toast notifications (replaces alert/confirm) ──
+let _lastToastKey='',_lastToastAt=0;
 function showToast(msg, duration=4000, isError=false){
+  const key=(isError?'1':'0')+'|'+msg,now=Date.now();
+  if(key===_lastToastKey&&now-_lastToastAt<1500&&document.getElementById('appToast'))return;
+  _lastToastKey=key;_lastToastAt=now;
   const old=document.getElementById('appToast');if(old)old.remove();
   const t=document.createElement('div');
   t.className='toast'+(isError?' toast-err':'');
@@ -4950,7 +4954,7 @@ function startPageLiveStream(){
       if(event.type==='replay')return;
       if(event.type==='changed'){
         if(data.versions?.portfolio){_helperPortfolioRev=Number(data.versions.portfolio);_seenPortfolioRev=_helperPortfolioRev;}
-        if((data.names||[]).includes('auto')){setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),0);}
+        if((data.names||[]).includes('auto')&&!_nativeEntryBusy){setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),0);}
         queuePageLiveReads(data.names||[]);return;
       }
       if(event.type==='pulse')return;
@@ -16555,9 +16559,26 @@ function kiteBridgeRequest(orders,side='BUY',automatic=true){
   });
 }
 let _nativeEntryBusy=false,_nativeEntryUnavailableAt=0;
+const _nativeTabId=typeof crypto!=='undefined'&&crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2);
 async function syncNativeKiteEntries(){
   if(_nativeEntryBusy||_kiteTransferBusy||_kiteSellBusy||!KITE_API||!AUTO_BUY_ENABLED||AUTO_BUY_STATUS.mode!=='browser-ioc')return;
+  const lockKey='rs_native_entry_lock';
+  let acquiredLock=false;
+  const releaseLock=()=>{
+    if(!acquiredLock||typeof localStorage==='undefined')return;
+    try{const cur=JSON.parse(localStorage.getItem(lockKey)||'null');if(cur?.owner===_nativeTabId)localStorage.removeItem(lockKey);}catch(_){}
+    acquiredLock=false;
+  };
+  if(typeof localStorage!=='undefined'){
+    try{
+      const cur=JSON.parse(localStorage.getItem(lockKey)||'null');
+      if(cur&&cur.owner!==_nativeTabId&&cur.until>Date.now())return;
+      localStorage.setItem(lockKey,JSON.stringify({owner:_nativeTabId,until:Date.now()+8000}));
+      acquiredLock=true;
+    }catch(_){}
+  }
   _nativeEntryBusy=true;
+  let followUp=false;
   try{
     // Poll the helper's read-only queue, not the extension/Kite, when there is no work.
     // Never infer an empty queue from a timeout or from the slower dashboard status cache.
@@ -16577,10 +16598,18 @@ async function syncNativeKiteEntries(){
     if(!r.ok)throw Error(r.why||'Kite submission unconfirmed');
     if(r.orderId){
       showToast('Submitted '+escHtml(r.symbol)+' to Kite. Waiting for confirmed fill and target GTT.',5000);
-      loadAutoBuyStatus();setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),100);
+      loadAutoBuyStatus();followUp=true;
     }
-  }catch(e){reportKiteBasketOutcome(false,'Immediate Auto-Buy: '+e.message,'BUY','native-entry');}
-  finally{_nativeEntryBusy=false;}
+  }catch(e){
+    const msg=String(e?.message||e||'');
+    if(!/A Kite basket transfer is already running|Cash left is below the minimum all-in allocation|Entry no longer fits available cash|Cash unavailable|Completed 5-minute ATR history is loading/i.test(msg)){
+      reportKiteBasketOutcome(false,'Immediate Auto-Buy: '+msg,'BUY','native-entry');
+    }
+  }finally{
+    _nativeEntryBusy=false;
+    releaseLock();
+    if(followUp)setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),250);
+  }
 }
 // Manual Scanner_Sell basket export retired: all sells/swaps execute directly via GTT/bridge path.
 let _kiteSellSent=null,_kiteSellBusy=false;
