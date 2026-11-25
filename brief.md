@@ -1,10 +1,11 @@
-# Active Task: Deployed v1784 / Operational
+# Active Task: Deployed v1785 / Operational
 
-Rocket Scanner v1784 deployed at 2026-11-25 09:25 IST. System operational and in sync with origin/master.
+Rocket Scanner v1785 deployed at 2026-11-25 09:40 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1785:** Add 0.35% backup GTT headroom, pre-mutation 0.25% rejection recovery, and ATR ratchet IOC exits
 - **v1784:** Add Post-Pause Anti-Wick entry guard to block climax peaks and upper-wick traps
 - **v1783:** Fix intraday vs delivery fees on carried same-day fills, fix paper BE+ stop gap execution & thin-ask sub-min buys, and clarify baseline subtitle
 - **v1782:** 1% pre-BE ratchet, BE+0.30% lock, coarse backup GTT sync, and tick dedup
