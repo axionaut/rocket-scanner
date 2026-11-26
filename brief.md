@@ -1,10 +1,11 @@
-# Active Task: Deployed v1809 / Operational
+# Active Task: Deployed v1810 / Operational
 
-Rocket Scanner v1809 deployed at 2026-11-26 19:59 IST. System operational and in sync with origin/master.
+Rocket Scanner v1810 deployed at 2026-11-26 20:05 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1810:** Fix fake drawdown spike on PAPER<->LIVE switches by normalizing live equity to baseline
 - **v1809:** Remove sideways uptick rebound-nudge ratchet; keep normal high-only ATR trailing
 - **v1808:** Fix model-switch MTM bookkeeping so Realized + Open = Total Net P&L across all Compare columns
 - **v1807:** Show Today's P&L row in Compare tab for all models
