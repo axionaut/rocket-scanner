@@ -1,10 +1,11 @@
-# Active Task: Deployed v1812 / Operational
+# Active Task: Deployed v1813 / Operational
 
-Rocket Scanner v1812 deployed at 2026-11-26 20:11 IST. System operational and in sync with origin/master.
+Rocket Scanner v1813 deployed at 2026-11-26 20:13 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1813:** Self-heal historical live-equity drawdown spikes on ModelComparison startup
 - **v1812:** Align LIVE Current Equity to equal-baseline scale with broker equity subline
 - **v1811:** Show Avg Position Size row in Compare tab for all models
 - **v1810:** Fix fake drawdown spike on PAPER<->LIVE switches by normalizing live equity to baseline
