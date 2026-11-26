@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 19:57 IST'; // release build date (IST)
-const APP_VERSION=1808;
+const BUILD_TS='2026-11-26 19:59 IST'; // release build date (IST)
+const APP_VERSION=1809;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11673,7 +11673,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
       stopPct: 0,
       viable: true,
       targetPolicy: 'rs-atr5m-rebound-ratchet-v2',
-      targetSource: 'No fixed target cap: shared 5-minute ATR stop rises on each rebound.',
+      targetSource: 'No fixed target cap: shared 5-minute ATR trailing stop lifts on new highs.',
       stopSource: 'Loss-bearing exits require booked-profit funding; broker GTTs obey price-gap and quantity checks.',
       rewardRisk: null
     };
@@ -11686,13 +11686,13 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
       stopPct: 0,
       viable: true,
       targetPolicy: 'rs-atr5m-rebound-ratchet-v2',
-      targetSource: 'Shared RS ATR exit: initial ATR14 stop from completed 5-minute candles, rising on each rebound and tightening on confirmed candle weakness.',
+      targetSource: 'Shared RS ATR exit: initial ATR14 stop from completed 5-minute candles, trailing new highs upward and tightening on confirmed candle weakness.',
       stopSource: 'Single-leg GTT trailing stop; dynamic breakeven locks cost; neither leg ever moves down.',
       rewardRisk: null
     };
   }
   return {targetPct:1.25+(executionControls?.targetExtraPct??0),basePct:1.25,stopPct:0,viable:true,targetPolicy:'bracket-v1520',
-    targetSource:'Shared ATR trailing stop rises on each rebound; no fixed exit target.',
+    targetSource:'Shared ATR trailing stop lifts on new highs; no fixed exit target.',
     stopSource:'Loss-bearing exits require reserved booked profit.',rewardRisk:null};
 }
 
@@ -12680,7 +12680,7 @@ function dashboardMarketCards(){
     add(2,'NSE',`${go} GO`,(floorModel()==='AVWAP_CROSS'?'Hard filters + 1st 5m close > T-2 AVWAP + 2-bar uptrend + CLV>=0.75':floorModel()==='TV_SCREENER'?'All 12 MA/Osc/Tech ratings Buy/Strong Buy · Day % ascending':floorModel()==='WAVE3_1M'?'Top-1 1m z-score in active wave window (09:20 / 10:30 / 13:00)':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation')+' · SMC 5m layer');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
-    if(dep?.spec?.exit?.policy==='rs-atr5m-rebound-ratchet-v2')add(3,'NSE','ATR rebound ratchet','Stop rises on each rebound; no minimum or maximum hold');
+    if(dep?.spec?.exit?.policy==='rs-atr5m-rebound-ratchet-v2')add(3,'NSE','ATR trailing stop','Trails new highs upward; no minimum or maximum hold');
     else add(3,'NSE',signed(tgt),`Target ${signed(tgt)}${sl > 0 ? ` | SL -${sl.toFixed(1)}%` : ' | Ratcheting MLoT trail'}`);
   }
   if(m.us){
