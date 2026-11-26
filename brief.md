@@ -1,10 +1,11 @@
-# Active Task: Deployed v1799 / Operational
+# Active Task: Deployed v1800 / Operational
 
-Rocket Scanner v1799 deployed at 2026-11-26 10:25 IST. System operational and in sync with origin/master.
+Rocket Scanner v1800 deployed at 2026-11-26 11:56 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1800:** Nudge sideways rebound ratchets by 1 min-tick while preserving peak ATR trail
 - **v1799:** Use shared rebound ratchets and preserve comparison baseline
 - **v1798:** Retry profit-lock tracker saves after filesystem errors
 - **v1797:** Back up validated helper and guard startup syntax
