@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 20:06 IST'; // release build date (IST)
-const APP_VERSION=1811;
+const BUILD_TS='2026-11-26 20:11 IST'; // release build date (IST)
+const APP_VERSION=1812;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -16854,7 +16854,7 @@ function renderModelComparison(){
     row('Signal Engine',c=>`<span style="color:${c.signalReady?'var(--green)':'var(--t2)'}" title="${escHtml(c.signalStatus||'')}">${escHtml(c.signalStatus||'—')}</span>`,'Eligible strategy signals passing hard filters; trades are still strictly limited and sized by free cash & position caps.'),
     sep('Capital & Return'),
     row('Starting Capital',c=>mcFmtRs(c.startingCapital),'Equal capital baseline captured from live equity (cash + holdings) at start.'),
-    row('Current Equity',c=>`<strong style="color:var(--t1)">${mcFmtRs(c.equity)}</strong>`),
+    row('Current Equity',c=>{const sub=c.isLive&&c.brokerEquity!=null&&Math.abs(c.brokerEquity-c.equity)>=1?`<span class="mc-subline">Broker ${mcFmtRs(c.brokerEquity)}</span>`:'';return `<strong style="color:var(--t1)">${mcFmtRs(c.equity)}</strong>${sub}`;},'Equal-baseline equity (Starting Capital + Total Net P&L). For the LIVE model, raw Kite equity is shown below if capital was added/carried.'),
     row('Free Cash',c=>c.isLive&&c.tradableCash!=null&&c.unsettledCash>=1?`${mcFmtRs(c.cash)}<span class="mc-subline">${mcFmtRs(c.tradableCash)} broker free · ${mcFmtRs(c.unsettledCash)} T+1 unsettled</span>`:mcFmtRs(c.cash),'Total uninvested cash + T+1 unsettled sale proceeds (broker tradable balance shown separately when holding sales are pending settlement).'),
     row('Deployed Capital',c=>mcFmtRs(c.deployedValue)),
     row('Total Net P&L',c=>`<strong style="color:${mcPnlColor(c.totalNet)}">${mcFmtRs(c.totalNet,true)} (${mcFmtPct(c.returnPct,true)})</strong>`,'Total mark-to-market change since comparison baseline after realized charges.'),
