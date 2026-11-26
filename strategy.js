@@ -1202,6 +1202,300 @@ function bookedSession(session,holdingCosts,tradebook){
 
   const TV_SCREENER_POLICY = 'tv-screener-daypct-asc-v1';
   const TV_SCREENER_EXIT_POLICY = 'rs-atr5m-rebound-ratchet-v2';
+
+  // LuxAlgo Smart Money Concepts (SMC) shared 5-minute layer (owner 26 Nov 2026).
+  // Causal on completed 5-minute bars only (no lookahead, no forming candles):
+  //   1. Bullish 5m Internal Structure (5-bar pivot BOS/CHoCH, internalTrend === +1)
+  //   2. Not inside an unmitigated Bearish Order Block (top 5 active internal/swing OBs)
+  //   3. Not in the top-5% Premium zone of the trailing 50-bar swing range
+  const SMC_POLICY = 'smc-5m-balanced-v1';
+  const SMC_CONFIG = Object.freeze({
+    internalLength: 5,
+    swingLength: 50,
+    atrLength: 200,
+    maxOrderBlocks: 100,
+    activeOrderBlocks: 5,
+    premiumStartRatio: 0.95,
+    discountEndRatio: 0.05,
+    minBars: 60
+  });
+
+  function _smcParseBar(r) {
+    if (!r) return null;
+    const isArr = Array.isArray(r);
+    const k = String(isArr ? r[0] : (r.k ?? r.key ?? r.t ?? ''));
+    const o = Number(isArr ? r[1] : r.o);
+    const h = Number(isArr ? r[2] : r.h);
+    const l = Number(isArr ? r[3] : r.l);
+    const c = Number(isArr ? r[4] : r.c);
+    const v = Number(isArr ? r[5] : (r.v ?? 0));
+    if (!k || !(o > 0 && h > 0 && l > 0 && c > 0) || h < l || !Number.isFinite(o) || !Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c)) return null;
+    const end = Date.parse(k.replace(' ', 'T') + (/[Zz]$|[+-]\d\d:?\d\d$/.test(k) ? '' : '+05:30')) + 300000;
+    return { k, o, h, l, c, v: Number.isFinite(v) ? v : 0, end };
+  }
+
+  function evaluateSmc5m(bars, now = Date.now(), opts = {}) {
+    const internalLen = Number(opts.internalLength) > 0 ? Number(opts.internalLength) : SMC_CONFIG.internalLength;
+    const swingLen = Number(opts.swingLength) > 0 ? Number(opts.swingLength) : SMC_CONFIG.swingLength;
+    const atrLen = Number(opts.atrLength) > 0 ? Number(opts.atrLength) : SMC_CONFIG.atrLength;
+    const maxOBs = Number(opts.maxOrderBlocks) > 0 ? Number(opts.maxOrderBlocks) : SMC_CONFIG.maxOrderBlocks;
+    const activeOBs = Number(opts.activeOrderBlocks) > 0 ? Number(opts.activeOrderBlocks) : SMC_CONFIG.activeOrderBlocks;
+    const minBars = Number(opts.minBars) > 0 ? Number(opts.minBars) : SMC_CONFIG.minBars;
+
+    const clean = [];
+    for (let i = 0; i < (bars?.length || 0); i++) {
+      const b = _smcParseBar(bars[i]);
+      if (!b) continue;
+      if (Number.isFinite(now) && Number.isFinite(b.end) && b.end > now) continue;
+      clean.push(b);
+    }
+    const n = clean.length;
+    if (!n) {
+      return {
+        policy: SMC_POLICY, bars: 0, ready: false, asOfKey: null,
+        internalTrend: 0, swingTrend: 0, lastInternalEvent: null, lastSwingEvent: null,
+        trailingTop: null, trailingBottom: null, premiumFloor: null, discountCeil: null,
+        activeBearishOBs: [], activeBullishOBs: [], activeBearishFVGs: [], activeBullishFVGs: []
+      };
+    }
+
+    const parsedHighs = new Array(n);
+    const parsedLows = new Array(n);
+    const swingHigh = { currentLevel: null, lastLevel: null, crossed: false, barIndex: -1, key: null };
+    const swingLow = { currentLevel: null, lastLevel: null, crossed: false, barIndex: -1, key: null };
+    const internalHigh = { currentLevel: null, lastLevel: null, crossed: false, barIndex: -1, key: null };
+    const internalLow = { currentLevel: null, lastLevel: null, crossed: false, barIndex: -1, key: null };
+
+    let swingLeg = 0, internalLeg = 0;
+    let swingTrend = 0, internalTrend = 0;
+    let lastSwingEvent = null, lastInternalEvent = null;
+    let trailingTop = null, trailingBottom = null;
+
+    const swingOrderBlocks = [];
+    const internalOrderBlocks = [];
+    const fairValueGaps = [];
+
+    let cumTr = 0, atrRma = null;
+
+    const updateLegAndPivot = (i, size, prevLeg, pHigh, pLow, isSwing) => {
+      if (i < size) return prevLeg;
+      const pivotIdx = i - size;
+      let maxAfter = -Infinity, minAfter = Infinity;
+      for (let j = pivotIdx + 1; j <= i; j++) {
+        if (clean[j].h > maxAfter) maxAfter = clean[j].h;
+        if (clean[j].l < minAfter) minAfter = clean[j].l;
+      }
+      let nextLeg = prevLeg;
+      if (clean[pivotIdx].h > maxAfter) nextLeg = 0;      // BEARISH_LEG -> pivot high
+      else if (clean[pivotIdx].l < minAfter) nextLeg = 1; // BULLISH_LEG -> pivot low
+
+      if (nextLeg !== prevLeg) {
+        if (nextLeg === 1) {
+          pLow.lastLevel = pLow.currentLevel;
+          pLow.currentLevel = clean[pivotIdx].l;
+          pLow.crossed = false;
+          pLow.barIndex = pivotIdx;
+          pLow.key = clean[pivotIdx].k;
+          if (isSwing) trailingBottom = pLow.currentLevel;
+        } else {
+          pHigh.lastLevel = pHigh.currentLevel;
+          pHigh.currentLevel = clean[pivotIdx].h;
+          pHigh.crossed = false;
+          pHigh.barIndex = pivotIdx;
+          pHigh.key = clean[pivotIdx].k;
+          if (isSwing) trailingTop = pHigh.currentLevel;
+        }
+      }
+      return nextLeg;
+    };
+
+    const storeOB = (pivotIdx, curIdx, bias, list, scope) => {
+      const start = Math.max(0, pivotIdx);
+      const end = curIdx > start ? curIdx : start + 1;
+      let pickIdx = start;
+      if (bias === -1) {
+        let best = -Infinity;
+        for (let j = start; j < end; j++) {
+          if (parsedHighs[j] > best) { best = parsedHighs[j]; pickIdx = j; }
+        }
+      } else {
+        let best = Infinity;
+        for (let j = start; j < end; j++) {
+          if (parsedLows[j] < best) { best = parsedLows[j]; pickIdx = j; }
+        }
+      }
+      const ob = {
+        barHigh: parsedHighs[pickIdx],
+        barLow: parsedLows[pickIdx],
+        barIndex: pickIdx,
+        key: clean[pickIdx].k,
+        bias,
+        scope
+      };
+      if (list.length >= maxOBs) list.pop();
+      list.unshift(ob);
+    };
+
+    const mitigateOBs = (list, barH, barL) => {
+      for (let k = list.length - 1; k >= 0; k--) {
+        const ob = list[k];
+        if ((ob.bias === -1 && barH > ob.barHigh) || (ob.bias === 1 && barL < ob.barLow)) {
+          list.splice(k, 1);
+        }
+      }
+    };
+
+    for (let i = 0; i < n; i++) {
+      const b = clean[i];
+      const prevC = i > 0 ? clean[i - 1].c : b.o;
+      const tr = i === 0 ? (b.h - b.l) : Math.max(b.h - b.l, Math.abs(b.h - prevC), Math.abs(b.l - prevC));
+      cumTr += tr;
+      if (i + 1 === atrLen) atrRma = cumTr / atrLen;
+      else if (i + 1 > atrLen) atrRma = ((atrRma * (atrLen - 1)) + tr) / atrLen;
+      const volMeasure = atrRma != null ? atrRma : (cumTr / (i + 1));
+
+      const highVolBar = volMeasure > 0 && (b.h - b.l) >= (2 * volMeasure);
+      parsedHighs[i] = highVolBar ? b.l : b.h;
+      parsedLows[i] = highVolBar ? b.h : b.l;
+
+      if (trailingTop != null && b.h > trailingTop) trailingTop = b.h;
+      if (trailingBottom != null && b.l < trailingBottom) trailingBottom = b.l;
+
+      // Mitigate existing FVGs before detecting new ones
+      for (let k = fairValueGaps.length - 1; k >= 0; k--) {
+        const g = fairValueGaps[k];
+        if ((g.bias === 1 && b.l < g.bottom) || (g.bias === -1 && b.h > g.top)) {
+          fairValueGaps.splice(k, 1);
+        }
+      }
+
+      swingLeg = updateLegAndPivot(i, swingLen, swingLeg, swingHigh, swingLow, true);
+      internalLeg = updateLegAndPivot(i, internalLen, internalLeg, internalHigh, internalLow, false);
+
+      // Internal structure BOS / CHoCH
+      if (i > 0) {
+        if (internalHigh.currentLevel != null && !internalHigh.crossed && internalHigh.currentLevel !== swingHigh.currentLevel) {
+          if (prevC <= internalHigh.currentLevel && b.c > internalHigh.currentLevel) {
+            const tag = internalTrend === -1 ? 'CHoCH' : 'BOS';
+            internalHigh.crossed = true;
+            internalTrend = 1;
+            lastInternalEvent = { tag, bias: 1, level: internalHigh.currentLevel, barIndex: i, key: b.k };
+            storeOB(internalHigh.barIndex, i, 1, internalOrderBlocks, 'internal');
+          }
+        }
+        if (internalLow.currentLevel != null && !internalLow.crossed && internalLow.currentLevel !== swingLow.currentLevel) {
+          if (prevC >= internalLow.currentLevel && b.c < internalLow.currentLevel) {
+            const tag = internalTrend === 1 ? 'CHoCH' : 'BOS';
+            internalLow.crossed = true;
+            internalTrend = -1;
+            lastInternalEvent = { tag, bias: -1, level: internalLow.currentLevel, barIndex: i, key: b.k };
+            storeOB(internalLow.barIndex, i, -1, internalOrderBlocks, 'internal');
+          }
+        }
+        // Swing structure BOS / CHoCH
+        if (swingHigh.currentLevel != null && !swingHigh.crossed) {
+          if (prevC <= swingHigh.currentLevel && b.c > swingHigh.currentLevel) {
+            const tag = swingTrend === -1 ? 'CHoCH' : 'BOS';
+            swingHigh.crossed = true;
+            swingTrend = 1;
+            lastSwingEvent = { tag, bias: 1, level: swingHigh.currentLevel, barIndex: i, key: b.k };
+            storeOB(swingHigh.barIndex, i, 1, swingOrderBlocks, 'swing');
+          }
+        }
+        if (swingLow.currentLevel != null && !swingLow.crossed) {
+          if (prevC >= swingLow.currentLevel && b.c < swingLow.currentLevel) {
+            const tag = swingTrend === 1 ? 'CHoCH' : 'BOS';
+            swingLow.crossed = true;
+            swingTrend = -1;
+            lastSwingEvent = { tag, bias: -1, level: swingLow.currentLevel, barIndex: i, key: b.k };
+            storeOB(swingLow.barIndex, i, -1, swingOrderBlocks, 'swing');
+          }
+        }
+      }
+
+      // Mitigate order blocks on current bar high/low
+      mitigateOBs(internalOrderBlocks, b.h, b.l);
+      mitigateOBs(swingOrderBlocks, b.h, b.l);
+
+      // Detect 3-bar Fair Value Gaps (informational telemetry)
+      if (i >= 2) {
+        const b1 = clean[i - 1], b2 = clean[i - 2];
+        if (b.l > b2.h && b1.c > b2.h) {
+          fairValueGaps.unshift({ top: b.l, bottom: b2.h, bias: 1, key: b1.k });
+          if (fairValueGaps.length > 50) fairValueGaps.pop();
+        } else if (b.h < b2.l && b1.c < b2.l) {
+          fairValueGaps.unshift({ top: b2.l, bottom: b.h, bias: -1, key: b1.k });
+          if (fairValueGaps.length > 50) fairValueGaps.pop();
+        }
+      }
+    }
+
+    const activeInternal = internalOrderBlocks.slice(0, activeOBs);
+    const activeSwing = swingOrderBlocks.slice(0, activeOBs);
+    const allActiveOBs = activeInternal.concat(activeSwing);
+    const hasRange = trailingTop != null && trailingBottom != null && trailingTop > trailingBottom;
+    const premiumFloor = hasRange ? (SMC_CONFIG.premiumStartRatio * trailingTop + (1 - SMC_CONFIG.premiumStartRatio) * trailingBottom) : null;
+    const discountCeil = hasRange ? (SMC_CONFIG.discountEndRatio * trailingTop + (1 - SMC_CONFIG.discountEndRatio) * trailingBottom) : null;
+
+    return {
+      policy: SMC_POLICY,
+      bars: n,
+      ready: n >= minBars,
+      asOfKey: clean[n - 1].k,
+      internalTrend,
+      swingTrend,
+      lastInternalEvent,
+      lastSwingEvent,
+      trailingTop,
+      trailingBottom,
+      premiumFloor,
+      discountCeil,
+      activeBearishOBs: allActiveOBs.filter(ob => ob.bias === -1),
+      activeBullishOBs: allActiveOBs.filter(ob => ob.bias === 1),
+      activeBearishFVGs: fairValueGaps.filter(g => g.bias === -1).slice(0, 5),
+      activeBullishFVGs: fairValueGaps.filter(g => g.bias === 1).slice(0, 5)
+    };
+  }
+
+  function smcEntryGuard(smc, price) {
+    if (!smc || !smc.ready) return null;
+    if (smc.internalTrend !== 1) {
+      if (smc.internalTrend === -1) {
+        const ev = smc.lastInternalEvent;
+        return ev
+          ? `SMC 5m: Bearish internal structure (${ev.tag} @ ₹${Number(ev.level).toFixed(2)})`
+          : 'SMC 5m: Bearish internal structure';
+      }
+      return 'SMC 5m: Awaiting bullish 5m internal structure (BOS/CHoCH)';
+    }
+    const px = Number(price);
+    if (px > 0 && Number.isFinite(px)) {
+      for (const ob of (smc.activeBearishOBs || [])) {
+        if (px >= ob.barLow && px <= ob.barHigh) {
+          const scopeLbl = ob.scope === 'swing' ? 'Swing' : 'Internal';
+          return `SMC 5m: Price ₹${px.toFixed(2)} inside unmitigated ${scopeLbl} Bearish OB (₹${Number(ob.barLow).toFixed(2)}–₹${Number(ob.barHigh).toFixed(2)})`;
+        }
+      }
+      if (smc.trailingTop > smc.trailingBottom && Number.isFinite(smc.premiumFloor) && px >= smc.premiumFloor) {
+        return `SMC 5m: Price ₹${px.toFixed(2)} in Premium zone (>= ₹${smc.premiumFloor.toFixed(2)}, top 5% of swing ₹${smc.trailingBottom.toFixed(2)}–₹${smc.trailingTop.toFixed(2)})`;
+      }
+    }
+    return null;
+  }
+
+  function smcSummary(smc, price) {
+    if (!smc || !smc.ready) return { ok: true, tag: 'SMC n/a', reason: null };
+    const reason = smcEntryGuard(smc, price);
+    if (reason) {
+      const shortTag = reason.includes('Bearish OB') ? 'SMC ✗ Bear OB'
+        : reason.includes('Premium') ? 'SMC ✗ Premium'
+        : reason.includes('Bearish internal') ? 'SMC ✗ Bear Int'
+        : 'SMC ✗ Wait';
+      return { ok: false, tag: shortTag, reason };
+    }
+    const evTag = smc.lastInternalEvent?.tag || 'Bull';
+    return { ok: true, tag: `SMC ✓ ${evTag}`, reason: null };
+  }
   function tvScreenerEntryState(source,symbol,quote,now=Date.now()) {
     const sym=String(symbol||'').toUpperCase();
     if(source?.activeModel!=='TV_SCREENER'||source?.rules?.pickPolicy!==TV_SCREENER_POLICY||source?.session!==nseClock(now).day){
@@ -1231,6 +1525,7 @@ function bookedSession(session,holdingCosts,tradebook){
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
     applySelectedModel,AVWAP_POLICY,AVWAP_UPTREND_CANDLES,AVWAP_JUMP_BAND,AVWAP_ROOM_MIN_PCT,AVWAP_CLV_MIN,avwapChartCrossing,avwapVwapUptrend,avwapJumpPct,avwapJumpInBand,avwapBarClv,avwapRoomPct,avwapCrossSignal,avwapEntryState,
     TV_SCREENER_POLICY,TV_SCREENER_EXIT_POLICY,tvScreenerEntryState,
+    SMC_POLICY,SMC_CONFIG,evaluateSmc5m,smcEntryGuard,smcSummary,
     entryScoreCapped,
     MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,DAY_CHANGE_BAND,dayChangeBandReason,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,

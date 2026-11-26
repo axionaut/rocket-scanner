@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 13:11 IST'; // release build date (IST)
-const APP_VERSION=1802;
+const BUILD_TS='2026-11-26 13:36 IST'; // release build date (IST)
+const APP_VERSION=1803;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12656,7 +12656,7 @@ function dashboardMarketCards(){
     const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'Native strategy';
     add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'}${floorModel()==='CUM'?' · Binary Pass/Fail':''}` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,floorModel()==='AVWAP_CROSS'?'Hard filters + 1st 5m close > T-2 AVWAP + 4-candle uptrend + 0.20%-0.60% jump + Room>0.8% + CLV>=0.75':floorModel()==='TV_SCREENER'?'All 12 MA/Osc/Tech ratings Buy/Strong Buy · Day % ascending':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation');
+    add(2,'NSE',`${go} GO`,(floorModel()==='AVWAP_CROSS'?'Hard filters + 1st 5m close > T-2 AVWAP + 2-bar uptrend + CLV>=0.75':floorModel()==='TV_SCREENER'?'All 12 MA/Osc/Tech ratings Buy/Strong Buy · Day % ascending':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation')+' · SMC 5m layer');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
     if(dep?.spec?.exit?.policy==='rs-atr5m-rebound-ratchet-v2')add(3,'NSE','ATR rebound ratchet','Stop rises on each rebound; no minimum or maximum hold');
