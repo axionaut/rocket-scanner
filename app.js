@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 19:51 IST'; // release build date (IST)
-const APP_VERSION=1807;
+const BUILD_TS='2026-11-26 19:57 IST'; // release build date (IST)
+const APP_VERSION=1808;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -16859,7 +16859,7 @@ function renderModelComparison(){
     row('Deployed Capital',c=>mcFmtRs(c.deployedValue)),
     row('Total Net P&L',c=>`<strong style="color:${mcPnlColor(c.totalNet)}">${mcFmtRs(c.totalNet,true)} (${mcFmtPct(c.returnPct,true)})</strong>`,'Total mark-to-market change since comparison baseline after realized charges.'),
     row("Today's P&L",c=>{const tn=Number(c.todayNet||0),tp=Number(c.todayReturnPct||0),tr=Number(c.todayRealizedNet||0);const sub=(c.todayTrades>0||Math.abs(tr)>=1)?`<span class="mc-subline">Realized ${mcFmtRs(tr,true)}${c.todayTrades?` · ${c.todayTrades} trade${c.todayTrades>1?'s':''}`:''}</span>`:'';return `<strong style="color:${mcPnlColor(tn)}">${mcFmtRs(tn,true)} (${mcFmtPct(tp,true)})</strong>${sub}`;},"Today's mark-to-market net P&L since prior session close (or start of day)."),
-    row('Realized Net P&L',c=>`<span style="color:${mcPnlColor(c.realizedNet)}">${mcFmtRs(c.realizedNet,true)}</span>`),
+    row('Realized Net P&L',c=>{const sm=Number(c.switchMtmNet||0);const sub=Math.abs(sm)>=1?`<span class="mc-subline">Trades ${mcFmtRs(c.closedTradesNet,true)} · Switch MTM ${mcFmtRs(sm,true)}</span>`:'';return `<span style="color:${mcPnlColor(c.realizedNet)}">${mcFmtRs(c.realizedNet,true)}</span>${sub}`;},'Net realized P&L after charges (including any open-position mark-to-market booked on a strategy switch so Realized + Open = Total Net P&L).'),
     row('Open P&L',c=>`<span style="color:${mcPnlColor(c.openNet)}">${mcFmtRs(c.openNet,true)}</span>`),
     sep('Trades & Risk'),
     row('Open Positions',c=>String(c.openPositions||0)),
