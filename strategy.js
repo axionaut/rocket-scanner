@@ -997,6 +997,18 @@ function bookedSession(session,holdingCosts,tradebook){
     const shortlist=positive.slice(0,5);
     return {policy:MEM_PICK_POLICY,limit:5,positiveCount:positive.length,topSymbols:shortlist.map(r=>r[0]),cutoff:shortlist.length?shortlist[shortlist.length-1][1]:null,shortlist};
   }
+  // Universal day-change eligibility band (owner 26 Nov 2026): -3% to +2% across all models.
+  const DAY_CHANGE_BAND = Object.freeze({minPct:-3,maxPct:2});
+  function dayChangeBandReason(dayPct) {
+    if(dayPct===null||dayPct===undefined||dayPct==='')return 'Awaiting day change %';
+    const d=Number(dayPct);
+    if(!Number.isFinite(d))return 'Awaiting day change %';
+    if(d<DAY_CHANGE_BAND.minPct||d>DAY_CHANGE_BAND.maxPct){
+      return `Day change ${d>=0?'+':''}${d.toFixed(2)}% outside ${DAY_CHANGE_BAND.minPct}% to +${DAY_CHANGE_BAND.maxPct}% band`;
+    }
+    return null;
+  }
+
   function memEntryState(source,symbol,quote,now=Date.now()) {
     if(source?.rules?.pickPolicy!==MEM_PICK_POLICY)return {state:'WAIT',reason:'Awaiting the adaptive top-five strategy update'};
     const p=source.ensemblePipeline,at=Date.parse(p?.asOf),sym=String(symbol||'').toUpperCase();
@@ -1005,6 +1017,9 @@ function bookedSession(session,holdingCosts,tradebook){
     if(!source.selection?.topSymbols?.includes(sym))return {state:'WAIT',reason:source.watchlist?.[sym]?.reason||'Awaiting the failed-stage assessment for this stock'};
     const ready=memQuoteState(quote,now);if(ready.state!=='READY')return ready;
     const price=Number(quote.price),vwap=Number(quote.vwap);
+    const prevClose=Number(quote?.prevClose);
+    const dayPct=Number.isFinite(Number(quote?.day))?Number(quote.day):(price>0&&prevClose>0?((price/prevClose)-1)*100:null);
+    if(dayPct!==null){const bandWhy=dayChangeBandReason(dayPct);if(bandWhy)return {state:'BLOCKED',reason:bandWhy};}
     if(!nseContinuous(now,sym))return {state:'WAIT',reason:'Outside continuous trading session'};
     if(price<vwap)return {state:'WAIT',reason:`Shortlist #${source.selection.topSymbols.indexOf(sym)+1}: needs +${((vwap/price-1)*100).toFixed(2)}% to reclaim VWAP ₹${vwap.toFixed(2)} (last ₹${price.toFixed(2)})`};
     const pick=source.picks?.find(p=>p.symbol===sym);
@@ -1217,7 +1232,7 @@ function bookedSession(session,holdingCosts,tradebook){
     applySelectedModel,AVWAP_POLICY,AVWAP_UPTREND_CANDLES,AVWAP_JUMP_BAND,AVWAP_ROOM_MIN_PCT,AVWAP_CLV_MIN,avwapChartCrossing,avwapVwapUptrend,avwapJumpPct,avwapJumpInBand,avwapBarClv,avwapRoomPct,avwapCrossSignal,avwapEntryState,
     TV_SCREENER_POLICY,TV_SCREENER_EXIT_POLICY,tvScreenerEntryState,
     entryScoreCapped,
-    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
+    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,DAY_CHANGE_BAND,dayChangeBandReason,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,
     CUM_REFINEMENT,
     cumRefinementReason,

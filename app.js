@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 12:34 IST'; // release build date (IST)
-const APP_VERSION=1801;
+const BUILD_TS='2026-11-26 13:11 IST'; // release build date (IST)
+const APP_VERSION=1802;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5590,6 +5590,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const signal=avwapTableSignal(s),why=surveillanceBlockReason(s.symbol);
     if(why)return {state:'BLOCKED',reason:why};
     if(s.basketEligible===false)return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
+    const dayBandEarly=RocketStrategy.dayChangeBandReason(s.day);
+    if(dayBandEarly)return {state:'BLOCKED',reason:dayBandEarly};
     if(signal?.state==='excluded')return {state:'BLOCKED',reason:signal.reason};
     if(!(Number(s.price)>=5&&Number(s.price)<=100000))return {state:'BLOCKED',reason:'Price outside model universe (Rs 5 to Rs 100,000)'};
     const bounds=RocketStrategy.nseSession(getSessionDate(),null,s.symbol),minute=RocketStrategy.nseClock().minute;
@@ -5605,6 +5607,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const ucBlock = upperCircuitBlock(s);
   if(ucBlock) return {state:'BLOCKED', reason:ucBlock};
   if(s.basketEligible === false) return {state:'BLOCKED', reason:'Non-EQ series or price band under 10%'};
+  const dayBandBlock = RocketStrategy.dayChangeBandReason(s.day);
+  if(dayBandBlock) return {state:'BLOCKED', reason:dayBandBlock};
   const impactBlock = typeof marketImpactHardFilterReason==='function'?marketImpactHardFilterReason(s):null;
   if(impactBlock) return {state:'BLOCKED', reason:impactBlock};
 
@@ -10577,18 +10581,22 @@ function buildHardFilterMethodologyHTML(E){
   const modelName=BTST_MODEL_NAMES?.[floorModel()]||floorModel(),op=currentFilterOpportunity();
   const modes=`<div class="filter-view"><button class="btn ${SURV_TABLE_MODE==='opportunity'?'active':''}" onclick="setSurvTableMode('opportunity')">Blocked stocks · today</button><button class="btn ${SURV_TABLE_MODE==='model'?'active':''}" onclick="setSurvTableMode('model')">${escHtml(modelName)} signals</button></div>`;
   if(SURV_TABLE_MODE==='model')return `<div class="filter-heading"><div><h3>Model-qualified filter evidence</h3><p>Actual recorded model qualifications with one rule removed; other entry checks still apply.</p></div>${modes}</div>`+buildModelFilterEvidenceHTML(E);
-  const rows=getSurvRules().map(rule=>{const b=op?.byRule?.[rule.key];return {ruleKey:rule.key,criteria:rule.column||rule.label,flagged:b?.flagged??SURV_RULE_HITS[rule.key]??0,net:b?.soleSamples?b.soleNet:null,per5000:b?.solePer5000??null,gains:b?.soleSamples?b.soleGains:null,losses:b?.soleSamples?-b.soleLosses:null,allNet:b?.samples?b.net:null,samples:b?.soleSamples||0,missing:b?.soleMissing||0,allSamples:b?.samples||0,impact:Math.abs(b?.soleNet||0)};});
+  const dayBandFlagged=ALL.filter(s=>typeof RocketStrategy!=='undefined'&&RocketStrategy.dayChangeBandReason(s.day)).length;
+  const rows=[
+    {ruleKey:'universal_day_band',criteria:'Universal: Day change outside -3% to +2%',flagged:dayBandFlagged,net:null,per5000:null,gains:null,losses:null,allNet:null,samples:0,missing:0,allSamples:0,impact:0,builtin:true},
+    ...getSurvRules().map(rule=>{const b=op?.byRule?.[rule.key];return {ruleKey:rule.key,criteria:rule.column||rule.label,flagged:b?.flagged??SURV_RULE_HITS[rule.key]??0,net:b?.soleSamples?b.soleNet:null,per5000:b?.solePer5000??null,gains:b?.soleSamples?b.soleGains:null,losses:b?.soleSamples?-b.soleLosses:null,allNet:b?.samples?b.net:null,samples:b?.soleSamples||0,missing:b?.soleMissing||0,allSamples:b?.samples||0,impact:Math.abs(b?.soleNet||0)};})
+  ];
   const money=v=>v==null?'&mdash;':`<span class="filter-money" style="color:${v>0?'var(--green)':v<0?'var(--red)':'var(--t3)'}">${fmtSignedINR(v)}</span>`;
   const cols=[
-    {key:'criteria',label:'Filter',align:'left',fmt:(v,r)=>`<button class="filter-name" onclick="showFilterEvidence('${r.ruleKey}')">${escHtml(v)}</button>${r.net==null?'':`<div class="filter-outcome" style="color:${r.net>0?'var(--amber)':'var(--green)'}">${r.net>0?'Blocked net winners':r.net<0?'Avoided a net loss':'Even after charges'}</div>`}`},
-    {key:'net',label:'Remove this rule alone ₹',align:'right',fmt:v=>v==null?`<span class="filter-empty">${op?.ok?'No priced sole-rule stocks':'Awaiting benchmark'}</span>`:money(v)},
+    {key:'criteria',label:'Filter',align:'left',fmt:(v,r)=>r.builtin?`<span style="font-weight:700;color:var(--t1)">${escHtml(v)}</span><div class="filter-outcome" style="color:var(--t3)">Active across all models</div>`:`<button class="filter-name" onclick="showFilterEvidence('${r.ruleKey}')">${escHtml(v)}</button>${r.net==null?'':`<div class="filter-outcome" style="color:${r.net>0?'var(--amber)':'var(--green)'}">${r.net>0?'Blocked net winners':r.net<0?'Avoided a net loss':'Even after charges'}</div>`}`},
+    {key:'net',label:'Remove this rule alone ₹',align:'right',fmt:(v,r)=>r.builtin?`<span class="filter-empty">Universal hard filter</span>`:v==null?`<span class="filter-empty">${op?.ok?'No priced sole-rule stocks':'Awaiting benchmark'}</span>`:money(v)},
     {key:'per5000',label:'Net per ₹5,000',align:'right',fmt:money},
     {key:'gains',label:'Gains missed ₹',align:'right',fmt:money},
     {key:'losses',label:'Losses avoided ₹',align:'right',fmt:money},
     {key:'allNet',label:'All matching stocks ₹',align:'right',fmt:(v,r)=>`<span title="${r.allSamples} priced stocks, including other-rule overlaps">${money(v)}</span>`},
     {key:'flagged',label:'Flagged',align:'right',fmt:v=>Number(v).toLocaleString()},
-    {key:'samples',label:'Priced · sole rule',align:'right',fmt:(v,r)=>`${v}${r.missing?` <span class="filter-empty">+ ${r.missing} missing</span>`:''}`},
-    {key:'ruleKey',label:'Action',align:'right',fmt:v=>`<button class="btn" onclick="showFilterEvidence('${v}')">Stocks</button> <button class="filter-remove" onclick="removeSurvRule('${v}')">Remove</button>`}
+    {key:'samples',label:'Priced · sole rule',align:'right',fmt:(v,r)=>r.builtin?'&mdash;':`${v}${r.missing?` <span class="filter-empty">+ ${r.missing} missing</span>`:''}`},
+    {key:'ruleKey',label:'Action',align:'right',fmt:(v,r)=>r.builtin?`<span class="filter-empty">Built-in</span>`:`<button class="btn" onclick="showFilterEvidence('${v}')">Stocks</button> <button class="filter-remove" onclick="removeSurvRule('${v}')">Remove</button>`}
   ];
   const sort=_methTbls.hf?.getSort?.();_methTbls.hf=makeSortableTable('tbl-hf',cols,rows,sort?.key||'impact',sort?.dir??-1);
   const configured=new Set(getSurvRules().map(r=>r.key));const available=SURV_FILE_RULES.filter(r=>!configured.has(r.key)).map(r=>`<option value="${escHtml(r.column||r.label)}"></option>`).join('');
@@ -10615,7 +10623,10 @@ function buildModelFilterEvidenceHTML(E){
 
   // Marginal forward observations, kept separate from real account P&L.
   const fileRuleKeys=new Set((SURV_FILE_RULES||[]).map(r=>r.key));
-  const hfRows=getSurvRules().map(rule=>{
+  const dayBandFlaggedM=ALL.filter(s=>typeof RocketStrategy!=='undefined'&&RocketStrategy.dayChangeBandReason(s.day)).length;
+  const hfRows=[
+    {criteria:'Universal: Day change outside -3% to +2%',flagged:dayBandFlaggedM,missed:null,avoided:null,net:null,samples:0,open:0,unresolved:0,verdict:null,active:true,ruleKey:'universal_day_band',inactiveNote:'',builtin:true},
+    ...getSurvRules().map(rule=>{
     const cost=SURV_COST_STATUS?.ok?SURV_COST_STATUS.byRule?.[rule.key]:null;
     const active=!SURV_HEADERS.length||fileRuleKeys.has(rule.key);
     return {
@@ -10628,7 +10639,7 @@ function buildModelFilterEvidenceHTML(E){
       active, ruleKey:rule.key,
       inactiveNote:active?'':'Entries blocked - configured REG1 column missing',
     };
-  });
+  })];
   const hfCols=[
     {key:'criteria',label:'REG1 Column',align:'left',
       fmt:(v,r)=>`<span style="font-size:13px;color:${r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:12px;color:var(--red);margin-top:2px">${r.inactiveNote}</div>`:''}</span>`,
@@ -10654,7 +10665,7 @@ function buildModelFilterEvidenceHTML(E){
       fmt:(v,r)=>`<span title="${r.open} open today; ${r.unresolved} without a usable mark" style="font-family:'DM Mono',monospace">${v}${r.open?` (${r.open} open)`:''}${r.unresolved?` + ${r.unresolved} unresolved`:''}</span>`,
       totFmt:v=>`<span style="font-weight:700;font-family:'DM Mono',monospace">${v||0}</span>`},
     {key:'ruleKey',label:'',align:'right',
-      fmt:(v,r)=>`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:12px;font-weight:700;cursor:pointer">Remove</button>`,
+      fmt:(v,r)=>r.builtin?`<span style="color:var(--t3);font-size:12px">Built-in</span>`:`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:12px;font-weight:700;cursor:pointer">Remove</button>`,
       totFmt:()=>''},
   ];
   const hfTotalsFlagged=hfRows.reduce((s,r)=>s+(r.active?(r.flagged||0):0),0);
@@ -11030,7 +11041,7 @@ function _renderMethodologyInner(){
     <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>
     <section id="meth-evidence"><h3>Current evidence</h3><p>Ensemble and PATH use their trained model scores; Cumulative Change records live price movements. Live entries follow the selected binary strategy and shared entry rules. Performance reports recorded account trades and their estimated charges.</p>
 </section>
-    <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from the 09:15 open, any time a fresh score crosses the selected model's floor with a fresh price. Market-trend gates are removed for all models. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
+    <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from the 09:15 open, any time a fresh score crosses the selected model's floor with a fresh price. Universal Day Change % hard filter (-3% to +2%) applies across all models. Market-trend gates are removed for all models. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
 </section>
     <details id="meth-models" class="meth-detail"><summary>Models, scoring and exits</summary><h3>Live score-crossing engine</h3>
     <p>The selected model supplies the recommendation table, counts, allocation and basket. Markov / mRMR / Ensemble filters for a green prior week and at least two completed red days with a cumulative drop of at least 3%, applies causal regime-specific mRMR weights, then ranks candidates with the five Ensemble learners. It selects at most five positive Ensemble scores, with an automatic cutoff at the weakest selected score. Regime-specific mRMR weights and the relative cutoff change with the market; no fixed 0.5 floor or saturation cap applies. Fresh price must reclaim session VWAP without exceeding it by 1.5%. Only candidates passing those live checks have numeric recommendation scores. Account, cash and broker checks still apply. Market-wide reference features remain intact; selection is not recalibrated on just five stocks. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
