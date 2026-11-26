@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 19:46 IST'; // release build date (IST)
-const APP_VERSION=1806;
+const BUILD_TS='2026-11-26 19:51 IST'; // release build date (IST)
+const APP_VERSION=1807;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -16858,6 +16858,7 @@ function renderModelComparison(){
     row('Free Cash',c=>c.isLive&&c.tradableCash!=null&&c.unsettledCash>=1?`${mcFmtRs(c.cash)}<span class="mc-subline">${mcFmtRs(c.tradableCash)} broker free · ${mcFmtRs(c.unsettledCash)} T+1 unsettled</span>`:mcFmtRs(c.cash),'Total uninvested cash + T+1 unsettled sale proceeds (broker tradable balance shown separately when holding sales are pending settlement).'),
     row('Deployed Capital',c=>mcFmtRs(c.deployedValue)),
     row('Total Net P&L',c=>`<strong style="color:${mcPnlColor(c.totalNet)}">${mcFmtRs(c.totalNet,true)} (${mcFmtPct(c.returnPct,true)})</strong>`,'Total mark-to-market change since comparison baseline after realized charges.'),
+    row("Today's P&L",c=>{const tn=Number(c.todayNet||0),tp=Number(c.todayReturnPct||0),tr=Number(c.todayRealizedNet||0);const sub=(c.todayTrades>0||Math.abs(tr)>=1)?`<span class="mc-subline">Realized ${mcFmtRs(tr,true)}${c.todayTrades?` · ${c.todayTrades} trade${c.todayTrades>1?'s':''}`:''}</span>`:'';return `<strong style="color:${mcPnlColor(tn)}">${mcFmtRs(tn,true)} (${mcFmtPct(tp,true)})</strong>${sub}`;},"Today's mark-to-market net P&L since prior session close (or start of day)."),
     row('Realized Net P&L',c=>`<span style="color:${mcPnlColor(c.realizedNet)}">${mcFmtRs(c.realizedNet,true)}</span>`),
     row('Open P&L',c=>`<span style="color:${mcPnlColor(c.openNet)}">${mcFmtRs(c.openNet,true)}</span>`),
     sep('Trades & Risk'),
