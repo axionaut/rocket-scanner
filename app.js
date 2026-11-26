@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 13:36 IST'; // release build date (IST)
-const APP_VERSION=1803;
+const BUILD_TS='2026-11-26 15:10 IST'; // release build date (IST)
+const APP_VERSION=1804;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8465,7 +8465,7 @@ async function releaseUnknownCashLocks(btn){
     if(!j?.ok)throw Error(j?.why||'Could not release lock');
     await loadKiteMargins();
     renderTradingDashboardNow();
-    showToast(j.released?.length?`Released ₹${Math.round(KITE_MARGINS.unknownReserved||0)>0?'remaining':'cash'} lock after verifying ${j.released.join(', ')} absent in Kite orders.`:'No absent unresolved locks found.',4000);
+    showToast(j.released?.length?`Released locks for ${j.released.join(', ')} after checking Kite orders.`:'No unresolved locks could be cleared.',4000);
   }catch(e){showToast('Release lock failed: '+e.message,5000,true);}
   finally{if(btn){btn.disabled=false;btn.textContent='Verify & Release';}}
 }
@@ -15160,7 +15160,7 @@ function renderStatusBar(){
   }
   if(KITE_MARGINS.unknownReserved>0){
     const syms=(KITE_MARGINS.unknownSyms||[]).join(', ');
-    bits.push(`<span style="color:var(--amber)" title="Cash held for unconfirmed browser entries (${escHtml(syms)}). Verify against live Kite orders to unlock.">🔒 ${fmtINR(KITE_MARGINS.unknownReserved)} locked (${escHtml(syms)}) <button class="btn" style="padding:1px 6px;font-size:11px;margin-left:4px" onclick="releaseUnknownCashLocks(this)">Verify & Release</button></span>`);
+    bits.push(`<span style="color:var(--amber)" title="Cash held for unconfirmed browser entries (${escHtml(syms)}). The helper checks live Kite orders automatically.">🔒 ${fmtINR(KITE_MARGINS.unknownReserved)} locked (${escHtml(syms)}) <button class="btn" style="padding:1px 6px;font-size:11px;margin-left:4px" onclick="releaseUnknownCashLocks(this)">Verify & Release</button></span>`);
   }
   let tape='';
   try{tape=compactTapeStatus();}catch(e){}

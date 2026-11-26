@@ -1,10 +1,11 @@
-# Active Task: Deployed v1803 / Operational
+# Active Task: Deployed v1804 / Operational
 
-Rocket Scanner v1803 deployed at 2026-11-26 13:36 IST. System operational and in sync with origin/master.
+Rocket Scanner v1804 deployed at 2026-11-26 15:10 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1804:** Automatically reconcile stale browser buy cash locks against Kite
 - **v1803:** Add LuxAlgo SMC 5m entry layer across all four models
 - **v1802:** Add universal -3% to +2% day-change hard filter across all models and Methodology list
 - **v1801:** Helper rebound GTT cap, crossed-SL re-anchor & heartbeat; mRMR breakout weighting & green-tape guard; AVWAP coil relaxation; MTF min price Rs 5; 20-row pagination
