@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 20:05 IST'; // release build date (IST)
-const APP_VERSION=1810;
+const BUILD_TS='2026-11-26 20:06 IST'; // release build date (IST)
+const APP_VERSION=1811;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -16863,6 +16863,7 @@ function renderModelComparison(){
     row('Open P&L',c=>`<span style="color:${mcPnlColor(c.openNet)}">${mcFmtRs(c.openNet,true)}</span>`),
     sep('Trades & Risk'),
     row('Open Positions',c=>String(c.openPositions||0)),
+    row('Avg Position Size',c=>{if(c.avgPositionSize==null)return '<span class="mc-muted">—</span>';const sub=c.avgOpenPosSize!=null&&c.avgClosedTradeSize!=null?`<span class="mc-subline">Closed avg ${mcFmtRs(c.avgClosedTradeSize)}</span>`:(c.avgOpenPosSize==null&&c.avgClosedTradeSize!=null?'<span class="mc-subline">from closed trades</span>':'');return `${mcFmtRs(c.avgPositionSize)}${sub}`;},'Average rupee size per open position (falls back to closed-trade average when flat).'),
     row('Closed Trades',c=>`${c.closedTrades||0} <span class="mc-muted">(${c.wins||0}W / ${c.losses||0}L)</span>`),
     row('Win Rate',c=>c.winRatePct!=null?`${Number(c.winRatePct).toFixed(1)}%`:'—'),
     row('Profit Factor',c=>c.profitFactor==='INF'?'∞':(c.profitFactor!=null?Number(c.profitFactor).toFixed(2):'—')),
