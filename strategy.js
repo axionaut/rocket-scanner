@@ -1514,9 +1514,23 @@ function bookedSession(session,holdingCosts,tradebook){
     return {state:'GO',score:1,dayPct:pick.dayPct??null,exitPolicy:TV_SCREENER_EXIT_POLICY,reason:pick.why};
   }
 
+  const WAVE3_1M_POLICY = 'wave3-1m-cash-v1';
+  function wave3EntryState(source, symbol, now = Date.now()) {
+    const sym = String(symbol || '').trim().toUpperCase();
+    if (!sym || !source) return { state: 'WAIT', reason: 'Awaiting 3-Wave 1m snapshot' };
+    if (source.activeModel !== 'WAVE3_1M' || source.wave3?.version !== WAVE3_1M_POLICY || source.session !== nseClock(now).day) {
+      return { state: 'WAIT', reason: 'Awaiting fresh current-session 3-Wave 1m ranking' };
+    }
+    const pick = source.picks?.find(p => p.symbol === sym);
+    if (!pick?.triggered || !source.crossings?.includes(sym)) {
+      return { state: 'WAIT', reason: source.watchlist?.[sym]?.reason || 'Awaiting active 3-Wave 1m Top-1 entry window' };
+    }
+    return { state: 'GO', score: Number(pick.score) || 1, reason: pick.why };
+  }
+
   function applySelectedModel(model) {
     const selected=String(model||'CUM').toUpperCase();
-    if(!['CUM','MARKOV_3PCT','ENS','PATH','MRMR','AVWAP_CROSS','TV_SCREENER'].includes(selected))throw Error('Unknown selected model');
+    if(!['CUM','MARKOV_3PCT','ENS','PATH','MRMR','AVWAP_CROSS','TV_SCREENER','WAVE3_1M'].includes(selected))throw Error('Unknown selected model');
     if(selected==='TV_SCREENER'){CONFIG.TARGET_PCT=0;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;return;}
     CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;
   }
@@ -1525,6 +1539,7 @@ function bookedSession(session,holdingCosts,tradebook){
     NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
     applySelectedModel,AVWAP_POLICY,AVWAP_UPTREND_CANDLES,AVWAP_JUMP_BAND,AVWAP_ROOM_MIN_PCT,AVWAP_CLV_MIN,avwapChartCrossing,avwapVwapUptrend,avwapJumpPct,avwapJumpInBand,avwapBarClv,avwapRoomPct,avwapCrossSignal,avwapEntryState,
     TV_SCREENER_POLICY,TV_SCREENER_EXIT_POLICY,tvScreenerEntryState,
+    WAVE3_1M_POLICY,wave3EntryState,
     SMC_POLICY,SMC_CONFIG,evaluateSmc5m,smcEntryGuard,smcSummary,
     entryScoreCapped,
     MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,DAY_CHANGE_BAND,dayChangeBandReason,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
