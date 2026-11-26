@@ -1020,6 +1020,8 @@ function bookedSession(session,holdingCosts,tradebook){
   const MRMR_INDICATOR_VERSION = 'mrmr-completed-indicators-20261117-v1';
   function mrmrEntryGuard(g) {
     if(!g||!(Number(g.bars)>=MRMR_GUARD.minBars))return null;
+    if(Number(g.open)>0&&Number(g.price)<=Number(g.open))
+      return `Red/flat intraday tape (₹${Number(g.price).toFixed(2)} <= open ₹${Number(g.open).toFixed(2)}); requires green tape`;
     if(Number(g.price)<Number(g.vwap)&&Number(g.vwapCross)<MRMR_GUARD.minCrossings)
       return `Below VWAP with only ${g.vwapCross} VWAP crossing(s) today; needs ${MRMR_GUARD.minCrossings} to show basing`;
     if(g.falling&&Number(g.sellVolShare)>=MRMR_GUARD.sellShare&&Number(g.volRatio)>=MRMR_GUARD.volRatio)
@@ -1029,16 +1031,35 @@ function bookedSession(session,holdingCosts,tradebook){
 
   // ChartIQ connects indicator samples at candle START timestamps. Attribute the
   // drawn intersection to that interval; detection still waits for the later close.
+  // Owner 26 Nov 2026: relax AVWAP_CROSS for early breakout coils (2-bar uptrend, flat-open
+  // opening-drive breakout, anti-chase extension cap replacing prior-2H ceiling, widened jump cap).
   const AVWAP_POLICY='avwap-t2-5m-v6-price-clv';
-  const AVWAP_UPTREND_CANDLES=4;
-  const AVWAP_JUMP_BAND=Object.freeze({minPct:0.20,maxPct:0.60});
+  const AVWAP_UPTREND_CANDLES=2;
+  const AVWAP_JUMP_BAND=Object.freeze({minPct:0.20,maxPct:5.0});
   const AVWAP_ROOM_MIN_PCT=0.8;
+  const AVWAP_MAX_EXT_OPEN_PCT=5.0;
+  const AVWAP_MAX_EXT_VWAP_PCT=2.5;
+  const AVWAP_OPEN_DRIVE_MAX_GAP_PCT=2.0;
   const AVWAP_CLV_MIN=0.75;
   function avwapChartCrossing(previous,current){
     const d0=Number(previous?.close)-Number(previous?.avwap),d1=Number(current?.close)-Number(current?.avwap);
     const t0=Date.parse(String(previous?.key).replace(' ','T')+'+05:30'),t1=Date.parse(String(current?.key).replace(' ','T')+'+05:30');
     if(!Number.isFinite(d0)||!Number.isFinite(d1)||!(d0<=0&&d1>0&&t1>t0))return null;
     return t0+(-d0/(d1-d0))*(t1-t0);
+  }
+  function avwapOpenDrive(sessionBars,priorClose){
+    if(!Array.isArray(sessionBars)||sessionBars.length!==2)return false;
+    const [b0,b1]=sessionBars;
+    if(!(b0.close>b0.avwap&&b1.close>b1.avwap))return false;
+    const gapPct=Number(priorClose)>0?100*(b0.open/Number(priorClose)-1):0;
+    return gapPct<=AVWAP_OPEN_DRIVE_MAX_GAP_PCT&&avwapVwapUptrend(sessionBars);
+  }
+  function avwapExtensionOk(bar,sessionOpen){
+    const c=Number(bar?.close),v=Number(bar?.vwap),o=Number(sessionOpen);
+    if(!(c>0&&v>0))return false;
+    const extVwap=100*(c/v-1);
+    const extOpen=o>0?100*(c/o-1):0;
+    return extVwap<=AVWAP_MAX_EXT_VWAP_PCT&&extOpen<=AVWAP_MAX_EXT_OPEN_PCT;
   }
   function avwapVwapUptrend(window){
     if(!Array.isArray(window)||window.length!==AVWAP_UPTREND_CANDLES)return false;
@@ -1070,7 +1091,7 @@ function bookedSession(session,holdingCosts,tradebook){
   }
   // First qualifying close above T-2 AVWAP, observed at completed 5m closes. No overnight comparison.
   function avwapCrossSignal(bars, session, anchor, now=Date.now(), bounds=null) {
-    let ap=0,av=0,sp=0,sv=0,previous=null,last=null,priorDay=null,priorPv=0,priorVol=0,priorBar=null,prior2High=0;
+    let ap=0,av=0,sp=0,sv=0,previous=null,last=null,priorDay=null,priorPv=0,priorVol=0,priorBar=null,prior2High=0,priorClose=0;
     const seen=new Set(),sessionBars=[],filtered=[];
     for(let i=0;i<bars.length;i++){
       const r=bars[i],key=String(r[0]),day=key.slice(0,10);
@@ -1090,12 +1111,14 @@ function bookedSession(session,holdingCosts,tradebook){
       const o=Number(r[1]),h=Number(r[2]),l=Number(r[3]),c=Number(r[4]),v=Number(r[5]),tp=(h+l+c)/3;
       if(!(v>=0&&tp>0&&o>0&&c>0&&h>=l&&Number.isFinite(v)&&Number.isFinite(tp)&&Number.isFinite(o)&&Number.isFinite(c)))return {triggered:false,reason:'Invalid OHLCV history'};
       ap+=tp*v;av+=v;
-      if(day<session){if(priorDay!==day){priorDay=day;priorPv=0;priorVol=0;}if(h>prior2High)prior2High=h;priorPv+=tp*v;priorVol+=v;priorBar={key,end};}
+      if(day<session){if(priorDay!==day){priorDay=day;priorPv=0;priorVol=0;}if(h>prior2High)prior2High=h;priorClose=c;priorPv+=tp*v;priorVol+=v;priorBar={key,end};}
       if(day===session){sp+=tp*v;sv+=v;if(sv>0&&av>0){previous=last;last={key,end,open:o,high:h,low:l,close:c,volume:v,vwap:sp/sv,avwap:ap/av};sessionBars.push(last);}}
     }
     if(!last)return {anchor,prior2High:prior2High||null,...priorBar,vwap:priorVol>0?priorPv/priorVol:null,avwap:av>0?ap/av:null,vwapSession:priorDay,displayOnly:true,triggered:false,reason:'Awaiting the first completed session candle; showing the last completed session'};
     if(!previous)return {...last,anchor,prior2High:prior2High||null,vwapSession:session,triggered:false,reason:'First session candle displayed; entry disabled on the first candle'};
+    const sessionOpen=sessionBars[0]?.open||last.open;
     const minute=nseClock(now).minute,crossingAt=avwapChartCrossing(previous,last);
+    const openDrive=crossingAt===null&&avwapOpenDrive(sessionBars,priorClose);
     const vwapWindow=sessionBars.slice(-AVWAP_UPTREND_CANDLES),vwapUptrend=avwapVwapUptrend(vwapWindow);
     const vwapJump=avwapJumpPct(previous,last),jumpInBand=avwapJumpInBand(vwapJump);
     let vwapRisingBars=last.volume>0&&last.close>=last.open?1:0;
@@ -1117,18 +1140,18 @@ function bookedSession(session,holdingCosts,tradebook){
         firstCrossKey=cBar.key;firstCrossAt=cCross;break;
       }
     }
-    const crossingAllowed=crossingAt!==null&&crossingAt>=openAt+300000&&crossingAt<closeAt-300000;
+    const crossingAllowed=openDrive||(crossingAt!==null&&crossingAt>=openAt+300000&&crossingAt<closeAt-300000);
     const executionAllowed=!!bounds&&minute>=bounds.open+5&&minute<bounds.close-5;
-    const isFirstCross=!firstCrossKey||firstCrossKey===last.key;
-    const roomPct=avwapRoomPct(prior2High,last.close),roomOk=Number.isFinite(roomPct)&&roomPct>AVWAP_ROOM_MIN_PCT;
+    const isFirstCross=openDrive||!firstCrossKey||firstCrossKey===last.key;
+    const roomPct=avwapRoomPct(prior2High,last.close),extOk=avwapExtensionOk(last,sessionOpen),roomOk=extOk;
     const clv=avwapBarClv(last),clvOk=Number.isFinite(clv)&&clv>=AVWAP_CLV_MIN;
-    const triggered=crossingAllowed&&vwapUptrend&&jumpInBand&&isFirstCross&&roomOk&&clvOk&&executionAllowed&&now>=last.end&&now<last.end+300000;
-    const crossingCandle=crossingAt===null?null:new Date(Math.floor((crossingAt-openAt)/300000)*300000+openAt+19800000).toISOString().slice(0,16).replace('T',' ');
+    const triggered=crossingAllowed&&vwapUptrend&&jumpInBand&&isFirstCross&&extOk&&clvOk&&executionAllowed&&now>=last.end&&now<last.end+300000;
+    const crossingCandle=crossingAt===null?(openDrive?last.key:null):new Date(Math.floor((crossingAt-openAt)/300000)*300000+openAt+19800000).toISOString().slice(0,16).replace('T',' ');
     const jumpTxt=Number.isFinite(vwapJump)?(vwapJump>=0?'+':'')+vwapJump.toFixed(2)+'%':'n/a';
     const roomTxt=Number.isFinite(roomPct)?(roomPct>=0?'+':'')+roomPct.toFixed(2)+'%':'n/a';
     const clvTxt=Number.isFinite(clv)?clv.toFixed(2):'n/a';
-    const reason=crossingAt!==null&&!crossingAllowed?'Chart price crossover belongs to the first or last session candle; entry disabled':crossingAllowed&&!vwapUptrend?(sessionBars.length<AVWAP_UPTREND_CANDLES?`5m close crossed T-2 AVWAP before 4 completed session candles (${sessionBars.length}/4); entry requires 4 contiguous rising candles and VWAP`:`5m close crossed T-2 AVWAP without 4 contiguous rising candles and rising session VWAP (${vwapRisingBars}/4 rising candles); entry disabled`):crossingAllowed&&!jumpInBand?(vwapJump<AVWAP_JUMP_BAND.minPct?`5m VWAP jump ${jumpTxt} is below the 0.20%-0.60% band; entry disabled`:`5m VWAP jump ${jumpTxt} exceeds the 0.20%-0.60% band (overextended); entry disabled`):crossingAllowed&&!isFirstCross?`Not the first qualifying Price > T-2 AVWAP cross today (earlier cross at ${firstCrossKey.slice(11,16)}); 1st cross only`:crossingAllowed&&!roomOk?`Room to T-2/T-1 high is ${roomTxt} (requires > 0.80%); entry disabled`:crossingAllowed&&!clvOk?`Candle CLV ${clvTxt} is below 0.75 (upper-wick rejection); entry disabled`:triggered?`5m close crossed above T-2 AVWAP on 4 rising candles (${jumpTxt} VWAP jump, room ${roomTxt}, CLV ${clvTxt})`:!executionAllowed?'Entry disabled outside the permitted session candles':'Awaiting a fresh 5m close crossover above T-2 AVWAP';
-    return {...last,anchor,prior2High:prior2High||null,roomPct,roomOk,clv,clvOk,isFirstCross,firstCrossKey,firstCrossAt,vwapSession:session,previous,vwapWindow,vwapUptrend,vwapRisingBars,vwapJumpPct:vwapJump,jumpInBand,sessionCandles:sessionBars.length,crossingAt,crossingCandle,detectedAt:last.end,triggered,expiresAt:last.end+300000,reason};
+    const reason=crossingAt!==null&&!crossingAllowed?'Chart price crossover belongs to the first or last session candle; entry disabled':crossingAllowed&&!vwapUptrend?(sessionBars.length<AVWAP_UPTREND_CANDLES?`5m close crossed T-2 AVWAP before ${AVWAP_UPTREND_CANDLES} completed session candles (${sessionBars.length}/${AVWAP_UPTREND_CANDLES})`:`5m close crossed T-2 AVWAP without ${AVWAP_UPTREND_CANDLES} contiguous rising candles and rising session VWAP (${vwapRisingBars}/${AVWAP_UPTREND_CANDLES}); entry disabled`):crossingAllowed&&!jumpInBand?(vwapJump<AVWAP_JUMP_BAND.minPct?`5m VWAP jump ${jumpTxt} is below the ${AVWAP_JUMP_BAND.minPct.toFixed(2)}%-${AVWAP_JUMP_BAND.maxPct.toFixed(2)}% band; entry disabled`:`5m VWAP jump ${jumpTxt} exceeds the ${AVWAP_JUMP_BAND.minPct.toFixed(2)}%-${AVWAP_JUMP_BAND.maxPct.toFixed(2)}% band (overextended); entry disabled`):crossingAllowed&&!isFirstCross?`Not the first qualifying Price > T-2 AVWAP cross today (earlier cross at ${firstCrossKey.slice(11,16)}); 1st cross only`:crossingAllowed&&!extOk?`Price extended beyond anti-chase cap (> ${AVWAP_MAX_EXT_VWAP_PCT}% above VWAP or > ${AVWAP_MAX_EXT_OPEN_PCT}% above open); entry disabled`:crossingAllowed&&!clvOk?`Candle CLV ${clvTxt} is below 0.75 (upper-wick rejection); entry disabled`:triggered?(openDrive?`Flat-open 5m opening-drive breakout above T-2 AVWAP (${jumpTxt} VWAP jump, CLV ${clvTxt})`:`5m close crossed above T-2 AVWAP on ${AVWAP_UPTREND_CANDLES} rising candles (${jumpTxt} VWAP jump, CLV ${clvTxt})`):!executionAllowed?'Entry disabled outside the permitted session candles':'Awaiting a fresh 5m close crossover or opening-drive breakout above T-2 AVWAP';
+    return {...last,anchor,prior2High:prior2High||null,priorClose:priorClose||null,sessionOpen,openDrive,roomPct,roomOk,extOk,clv,clvOk,isFirstCross,firstCrossKey,firstCrossAt,vwapSession:session,previous,vwapWindow,vwapUptrend,vwapRisingBars,vwapJumpPct:vwapJump,jumpInBand,sessionCandles:sessionBars.length,crossingAt,crossingCandle,detectedAt:last.end,triggered,expiresAt:last.end+300000,reason};
   }
   function avwapEntryState(source,symbol,now=Date.now()){
     const signal=source?.avwap?.signals?.[symbol];
@@ -1136,24 +1159,26 @@ function bookedSession(session,holdingCosts,tradebook){
     const bounds=nseSession(source.session,null,symbol),minute=nseClock(now).minute;
     if(!bounds||minute<bounds.open+5||minute>=bounds.close-5)return {state:'WAIT',reason:'Entry disabled outside the permitted session candles'};
     const cross=avwapChartCrossing(signal?.previous,signal),openAt=Date.parse(source.session+'T00:00:00+05:30')+bounds.open*60000,closeAt=Date.parse(source.session+'T00:00:00+05:30')+bounds.close*60000;
+    const openDrive=cross===null&&Boolean(signal?.openDrive)&&signal?.sessionCandles===2&&avwapOpenDrive(signal?.vwapWindow,signal?.priorClose);
     if(cross!==null&&(cross<openAt+300000||cross>=closeAt-300000))return {state:'WAIT',reason:'Chart price crossover belongs to the first or last session candle; entry disabled'};
+    const activeEvent=cross!==null||openDrive;
     const uptrend=avwapVwapUptrend(signal?.vwapWindow)&&signal?.vwapWindow?.[AVWAP_UPTREND_CANDLES-1]?.key===signal?.key&&signal?.vwapWindow?.[AVWAP_UPTREND_CANDLES-2]?.key===signal?.previous?.key;
-    if(cross!==null&&!uptrend)return {state:'WAIT',reason:signal?.reason?.includes('4 contiguous')||signal?.reason?.includes('4 completed')?signal.reason:'5m close crossover lacks 4 contiguous rising candles and rising session VWAP; entry disabled'};
+    if(activeEvent&&!uptrend)return {state:'WAIT',reason:signal?.reason||`5m close crossover lacks ${AVWAP_UPTREND_CANDLES} contiguous rising candles and rising session VWAP; entry disabled`};
     const jumpPct=avwapJumpPct(signal?.previous,signal),jumpOk=avwapJumpInBand(jumpPct);
-    if(cross!==null&&!jumpOk)return {state:'WAIT',reason:signal?.reason?.includes('0.20%-0.60%')?signal.reason:'5m VWAP crossover jump outside the 0.20%-0.60% band; entry disabled'};
-    const firstCrossOk=signal?.isFirstCross!==false&&(!signal?.firstCrossKey||signal.firstCrossKey===signal?.key);
-    if(cross!==null&&!firstCrossOk)return {state:'WAIT',reason:signal?.reason?.includes('first qualifying')?signal.reason:'Not the first qualifying Price > T-2 AVWAP cross today; entry disabled'};
-    const roomPct=avwapRoomPct(signal?.prior2High,signal?.close),roomOk=Number.isFinite(roomPct)&&roomPct>AVWAP_ROOM_MIN_PCT;
-    if(cross!==null&&!roomOk)return {state:'WAIT',reason:signal?.reason?.includes('Room to T-2/T-1 high')?signal.reason:'Room to T-2/T-1 high must exceed 0.80%; entry disabled'};
+    if(activeEvent&&!jumpOk)return {state:'WAIT',reason:signal?.reason||'5m VWAP crossover jump outside allowed band; entry disabled'};
+    const firstCrossOk=openDrive||(signal?.isFirstCross!==false&&(!signal?.firstCrossKey||signal.firstCrossKey===signal?.key));
+    if(activeEvent&&!firstCrossOk)return {state:'WAIT',reason:signal?.reason?.includes('first qualifying')?signal.reason:'Not the first qualifying Price > T-2 AVWAP cross today; entry disabled'};
+    const extOk=avwapExtensionOk(signal,signal?.sessionOpen);
+    if(activeEvent&&!extOk)return {state:'WAIT',reason:signal?.reason||'Price extended beyond anti-chase cap; entry disabled'};
     const clv=avwapBarClv(signal),clvOk=Number.isFinite(clv)&&clv>=AVWAP_CLV_MIN;
-    if(cross!==null&&!clvOk)return {state:'WAIT',reason:signal?.reason?.includes('Candle CLV')?signal.reason:'Candle CLV must be >= 0.75; entry disabled'};
+    if(activeEvent&&!clvOk)return {state:'WAIT',reason:signal?.reason?.includes('Candle CLV')?signal.reason:'Candle CLV must be >= 0.75; entry disabled'};
     const age=now-Date.parse(source.avwap.asOf);
     if(!(age>=0&&age<=30000))return {state:'WAIT',reason:'Crossover data stale; awaiting current update'};
     if(signal?.triggered&&now>=signal.expiresAt)return {state:'WAIT',reason:'Crossover expired; awaiting a new upward crossing'};
-    if(!signal?.triggered||now<signal.end)return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Awaiting a fresh 5m close crossover above T-2 AVWAP'};
+    if(!signal?.triggered||now<signal.end)return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Awaiting a fresh 5m close crossover or opening-drive breakout above T-2 AVWAP'};
     if(!source.crossings?.includes(symbol))return {state:'WAIT',reason:source.watchlist?.[symbol]?.reason||'Hard filters or execution readiness pending'};
-    if(cross===null||!uptrend||!jumpOk||!firstCrossOk||!roomOk||!clvOk||signal.refreshing||signal.displayOnly)return {state:'WAIT',reason:'Awaiting verified current chart crossover evidence'};
-    return {state:'GO',score:1,reason:signal.reason,evidence:{policy:AVWAP_POLICY,anchor:signal.anchor,prior2High:signal.prior2High,roomPct,clv,firstCrossKey:signal.firstCrossKey||signal.key,previous:signal.previous,current:{key:signal.key,end:signal.end,open:signal.open,high:signal.high,low:signal.low,close:signal.close,vwap:signal.vwap,avwap:signal.avwap},vwapWindow:signal.vwapWindow,vwapUptrend:true,vwapJumpPct:jumpPct,jumpInBand:true,crossingAt:cross,crossingCandle:signal.crossingCandle,detectedAt:signal.end,sourceAsOf:source.avwap.asOf}};
+    if(!activeEvent||!uptrend||!jumpOk||!firstCrossOk||!extOk||!clvOk||signal.refreshing||signal.displayOnly)return {state:'WAIT',reason:'Awaiting verified current chart crossover evidence'};
+    return {state:'GO',score:1,reason:signal.reason,evidence:{policy:AVWAP_POLICY,anchor:signal.anchor,prior2High:signal.prior2High,openDrive,extOk,clv,firstCrossKey:signal.firstCrossKey||signal.key,previous:signal.previous,current:{key:signal.key,end:signal.end,open:signal.open,high:signal.high,low:signal.low,close:signal.close,vwap:signal.vwap,avwap:signal.avwap},vwapWindow:signal.vwapWindow,vwapUptrend:true,vwapJumpPct:jumpPct,jumpInBand:true,crossingAt:cross,crossingCandle:signal.crossingCandle,detectedAt:signal.end,sourceAsOf:source.avwap.asOf}};
   }
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
   function entryGateApplies(){

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 11:56 IST'; // release build date (IST)
-const APP_VERSION=1800;
+const BUILD_TS='2026-11-26 12:34 IST'; // release build date (IST)
+const APP_VERSION=1801;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -121,7 +121,7 @@ function updateModeUI(){
   if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='MARKOV_3PCT'?'Markov · mRMR · Ensemble':v==='MRMR'?'Original mRMR':v==='AVWAP_CROSS'?'VWAP / T-2 AVWAP Cross (5m)':v==='TV_SCREENER'?'MTF Ratings Screener (1m/5m/15m/1D)':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
-let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
+let ALL=[],FILT=[],PG=1,PGSZ=20,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
 let SHOW_INELIGIBLE=false;
 function toggleBelowThreshold(){
   SHOW_INELIGIBLE=!SHOW_INELIGIBLE;
@@ -4033,8 +4033,8 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   if(floorModel()==='MARKOV_3PCT')return 'Final Ensemble score for a current top-five positive candidate passing live VWAP entry checks; execution remains subject to funding and broker validation.';
-  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: 1st completed 5m close crossing above HLC/3 AVWAP anchored at T-2 session open on 4 contiguous rising candles, 0.20%-0.60% VWAP jump, >0.8% room to T-2/T-1 high, and candle CLV >= 0.75. First and last candles excluded.';
-  if(floorModel()==='TV_SCREENER')return `MTF Ratings Screener: 1m/5m/15m/1D MA, Oscillator & Tech ratings all Buy/Strong Buy, Price 25-${getScreenerMaxPrice()}, Price*Vol > 5 Cr, RelVol > 1.1, Shareholders > 5k, Low 30m >= VWAP. Sorted Day % ascending; shared ATR rebound ratchet.`;
+  if(floorModel()==='AVWAP_CROSS')return 'Binary entry: 1st completed 5m close crossing (or flat-open opening-drive breakout) above HLC/3 AVWAP anchored at T-2 session open on 2 contiguous rising candles, >=0.20% VWAP jump, anti-chase extension cap (<=2.5% VWAP / <=5% open), and candle CLV >= 0.75.';
+  if(floorModel()==='TV_SCREENER')return `MTF Ratings Screener: 1m/5m/15m/1D MA, Oscillator & Tech ratings all Buy/Strong Buy, Price 5-${getScreenerMaxPrice()}, Price*Vol > 5 Cr, RelVol > 1.1, Shareholders > 5k, Low 30m >= VWAP. Sorted Day % ascending; shared ATR rebound ratchet.`;
   if(floorModel()==='MRMR')return 'Original mRMR (0-100 scale): learned across all filtered stocks from prior-close indicators and actual returns today.';
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
@@ -8499,7 +8499,7 @@ let executionControls=null;
 const executionControlDirty=new Set();
 function getScreenerMaxPrice(){
   const v=Number(executionControls?.screenerMaxPrice);
-  return Number.isFinite(v)&&v>=25?v:1200;
+  return Number.isFinite(v)&&v>=5?v:1200;
 }
 function applyExecutionControls(controls){
   if(!controls||!Number.isInteger(controls.minPositionRs)||!Number.isInteger(controls.maxPositionRs)||!Number.isFinite(controls.targetExtraPct))return;
@@ -8539,8 +8539,8 @@ async function saveExecutionControl(key,el){
   }
   const value=Number(raw);
   const other=key==='minPositionRs'?executionControls?.maxPositionRs:key==='maxPositionRs'?executionControls?.minPositionRs:null;
-  const valid=raw!==''&&Number.isFinite(value)&&(key==='screenerMaxPrice'?value>=25&&value<=1e6:isPos?Number.isInteger(value)&&value>=(key==='maxPositionRs'?1000:0)&&value<=1e8&&(other==null||(key==='minPositionRs'?value<=other:value>=other)):value>=0&&value<=100);
-  if(!valid){showToast(key==='screenerMaxPrice'?'Enter a screener max price from ₹25 to ₹10,00,000 (or clear for ₹1,200).':isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100% (or clear for auto).',5000,true);return;}
+  const valid=raw!==''&&Number.isFinite(value)&&(key==='screenerMaxPrice'?value>=5&&value<=1e6:isPos?Number.isInteger(value)&&value>=(key==='maxPositionRs'?1000:0)&&value<=1e8&&(other==null||(key==='minPositionRs'?value<=other:value>=other)):value>=0&&value<=100);
+  if(!valid){showToast(key==='screenerMaxPrice'?'Enter a screener max price from ₹5 to ₹10,00,000 (or clear for ₹1,200).':isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100% (or clear for auto).',5000,true);return;}
   el.disabled=true;
   try{
     const payload=key==='targetExtraPct'?{targetExtraPct:value,targetExtraManual:true}:{[key]:value};

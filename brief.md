@@ -1,10 +1,11 @@
-# Active Task: Deployed v1800 / Operational
+# Active Task: Deployed v1801 / Operational
 
-Rocket Scanner v1800 deployed at 2026-11-26 11:56 IST. System operational and in sync with origin/master.
+Rocket Scanner v1801 deployed at 2026-11-26 12:34 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1801:** Helper rebound GTT cap, crossed-SL re-anchor & heartbeat; mRMR breakout weighting & green-tape guard; AVWAP coil relaxation; MTF min price Rs 5; 20-row pagination
 - **v1800:** Nudge sideways rebound ratchets by 1 min-tick while preserving peak ATR trail
 - **v1799:** Use shared rebound ratchets and preserve comparison baseline
 - **v1798:** Retry profit-lock tracker saves after filesystem errors
