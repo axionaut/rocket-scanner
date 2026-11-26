@@ -1161,7 +1161,7 @@ function bookedSession(session,holdingCosts,tradebook){
   }
 
   const TV_SCREENER_POLICY = 'tv-screener-daypct-asc-v1';
-  const TV_SCREENER_EXIT_POLICY = 'rs-sl1pct-atr-ratchet-v1';
+  const TV_SCREENER_EXIT_POLICY = 'rs-atr5m-rebound-ratchet-v2';
   function tvScreenerEntryState(source,symbol,quote,now=Date.now()) {
     const sym=String(symbol||'').toUpperCase();
     if(source?.activeModel!=='TV_SCREENER'||source?.rules?.pickPolicy!==TV_SCREENER_POLICY||source?.session!==nseClock(now).day){
@@ -1183,7 +1183,7 @@ function bookedSession(session,holdingCosts,tradebook){
   function applySelectedModel(model) {
     const selected=String(model||'CUM').toUpperCase();
     if(!['CUM','MARKOV_3PCT','ENS','PATH','MRMR','AVWAP_CROSS','TV_SCREENER'].includes(selected))throw Error('Unknown selected model');
-    if(selected==='TV_SCREENER'){CONFIG.TARGET_PCT=0;CONFIG.STOP_LOSS_PCT=1;CONFIG.MAX_HOLDING_DAYS=null;return;}
+    if(selected==='TV_SCREENER'){CONFIG.TARGET_PCT=0;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;return;}
     CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;
   }
 
