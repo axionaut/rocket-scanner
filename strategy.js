@@ -997,14 +997,24 @@ function bookedSession(session,holdingCosts,tradebook){
     const shortlist=positive.slice(0,5);
     return {policy:MEM_PICK_POLICY,limit:5,positiveCount:positive.length,topSymbols:shortlist.map(r=>r[0]),cutoff:shortlist.length?shortlist[shortlist.length-1][1]:null,shortlist};
   }
-  // Universal day-change eligibility band (owner 26 Nov 2026): -3% to +2% across all models.
-  const DAY_CHANGE_BAND = Object.freeze({minPct:-3,maxPct:2});
-  function dayChangeBandReason(dayPct) {
+  // User-configurable universal day-change eligibility band (default: no limits).
+  const DAY_CHANGE_BAND = {minPct:null,maxPct:null};
+  function setDayChangeBand(minPct,maxPct) {
+    DAY_CHANGE_BAND.minPct = (minPct===null||minPct===undefined||minPct==='') ? null : (Number.isFinite(Number(minPct)) ? Number(minPct) : null);
+    DAY_CHANGE_BAND.maxPct = (maxPct===null||maxPct===undefined||maxPct==='') ? null : (Number.isFinite(Number(maxPct)) ? Number(maxPct) : null);
+    return {...DAY_CHANGE_BAND};
+  }
+  function dayChangeBandReason(dayPct,band=DAY_CHANGE_BAND) {
+    const minP = band?.minPct ?? null, maxP = band?.maxPct ?? null;
+    if(minP===null&&maxP===null)return null;
     if(dayPct===null||dayPct===undefined||dayPct==='')return 'Awaiting day change %';
     const d=Number(dayPct);
     if(!Number.isFinite(d))return 'Awaiting day change %';
-    if(d<DAY_CHANGE_BAND.minPct||d>DAY_CHANGE_BAND.maxPct){
-      return `Day change ${d>=0?'+':''}${d.toFixed(2)}% outside ${DAY_CHANGE_BAND.minPct}% to +${DAY_CHANGE_BAND.maxPct}% band`;
+    if(minP!==null&&d<minP){
+      return `Day change ${d>=0?'+':''}${d.toFixed(2)}% below Min ${minP>=0?'+':''}${minP}%`;
+    }
+    if(maxP!==null&&d>maxP){
+      return `Day change ${d>=0?'+':''}${d.toFixed(2)}% above Max ${maxP>=0?'+':''}${maxP}%`;
     }
     return null;
   }
@@ -1542,7 +1552,7 @@ function bookedSession(session,holdingCosts,tradebook){
     WAVE3_1M_POLICY,wave3EntryState,
     SMC_POLICY,SMC_CONFIG,evaluateSmc5m,smcEntryGuard,smcSummary,
     entryScoreCapped,
-    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,DAY_CHANGE_BAND,dayChangeBandReason,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
+    MEM_PICK_POLICY,MEM_QUOTE_TTL_MS,DAY_CHANGE_BAND,setDayChangeBand,dayChangeBandReason,MRMR_GUARD,MRMR_INDICATOR_VERSION,mrmrEntryGuard,selectMemCandidates,memEntryState,memQuoteState,
     CUM_ENTRY_BAND,
     CUM_REFINEMENT,
     cumRefinementReason,

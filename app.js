@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 20:13 IST'; // release build date (IST)
-const APP_VERSION=1813;
+const BUILD_TS='2026-11-26 20:30 IST'; // release build date (IST)
+const APP_VERSION=1814;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8529,10 +8529,15 @@ function getScreenerMaxPrice(){
 function applyExecutionControls(controls){
   if(!controls||!Number.isInteger(controls.minPositionRs)||!Number.isInteger(controls.maxPositionRs)||!Number.isFinite(controls.targetExtraPct))return;
   const changed=JSON.stringify(executionControls)!==JSON.stringify(controls);
+  const prevMin=executionControls?.dayChangeMinPct??null,prevMax=executionControls?.dayChangeMaxPct??null;
   executionControls=controls;
+  if(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.setDayChangeBand==='function'){
+    RocketStrategy.setDayChangeBand(controls.dayChangeMinPct??null,controls.dayChangeMaxPct??null);
+  }
+  const dayBandChanged=prevMin!==(controls.dayChangeMinPct??null)||prevMax!==(controls.dayChangeMaxPct??null);
   const lbl=document.getElementById('fTargetExtraLabel');
   if(lbl)lbl.textContent=controls.targetExtraSource==='manual'?'Swap target + % (manual)':'Swap target + % (auto)';
-  for(const [key,id] of [['targetExtraPct','fTargetExtra'],['minPositionRs','fMinPosition'],['maxPositionRs','fMaxPosition'],['screenerMaxPrice','fScreenerMaxPrice']]){
+  for(const [key,id] of [['targetExtraPct','fTargetExtra'],['minPositionRs','fMinPosition'],['maxPositionRs','fMaxPosition'],['screenerMaxPrice','fScreenerMaxPrice'],['dayChangeMinPct','fDayChangeMin'],['dayChangeMaxPct','fDayChangeMax']]){
     const el=document.getElementById(id);
     if(!el)continue;
     if(key==='targetExtraPct'){
@@ -8542,30 +8547,31 @@ function applyExecutionControls(controls){
         el.value=controls.targetExtraSource==='mlot-weighted-median'?Number(controls[key]).toFixed(2):controls[key];
       }
     }else if(!executionControlDirty.has(key)&&document.activeElement!==el){
-      el.value=key==='screenerMaxPrice'?(controls[key]??1200):controls[key];
+      el.value=key==='screenerMaxPrice'?(controls[key]??1200):(key==='dayChangeMinPct'||key==='dayChangeMaxPct')?(controls[key]??''):controls[key];
     }
   }
+  if(dayBandChanged){for(const row of ALL)ROW_ACTION_MEMO.delete(row);if(ALL.length&&typeof applyFilters==='function')applyFilters({preservePage:true});}
   if(changed){_dualPlanMemo=null;_usPlanMemo=null;if(typeof updateModeUI==='function')updateModeUI();if(typeof renderStats==='function')renderStats();}
 }
 // 16 Nov 2026 (owner): Min/Max position (rupees) replace "Stocks per allocation" for normal allocation buys.
 async function saveExecutionControl(key,el){
-  const raw=el.value.trim(),isPos=key==='minPositionRs'||key==='maxPositionRs';
-  if((key==='targetExtraPct'||key==='screenerMaxPrice')&&raw===''){
+  const raw=el.value.trim(),isPos=key==='minPositionRs'||key==='maxPositionRs',isDayBand=key==='dayChangeMinPct'||key==='dayChangeMaxPct';
+  if((key==='targetExtraPct'||key==='screenerMaxPrice'||isDayBand)&&raw===''){
     el.disabled=true;
     try{
-      const resetBody=key==='targetExtraPct'?{targetExtraPct:null,targetExtraManual:false}:{screenerMaxPrice:null};
+      const resetBody=key==='targetExtraPct'?{targetExtraPct:null,targetExtraManual:false}:{[key]:null};
       const result=await readHelperResponse('/api/execution-controls',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(resetBody),timeout:8000});
       if(!result?.ok)throw Error(result?.why||'Could not reset execution control');
       executionControlDirty.delete(key);applyExecutionControls(result.controls);
       if(typeof applyFilters==='function')applyFilters({preservePage:true});
-      showToast(key==='targetExtraPct'?'Target addition: auto (+'+Number(result.controls.targetExtraPct).toFixed(2)+'%)':'Screener max price: ₹'+Number(result.controls.screenerMaxPrice||1200).toLocaleString('en-IN'));
+      showToast(key==='targetExtraPct'?'Target addition: auto (+'+Number(result.controls.targetExtraPct).toFixed(2)+'%)':isDayBand?(key==='dayChangeMinPct'?'Day % min: no limit':'Day % max: no limit'):'Screener max price: ₹'+Number(result.controls.screenerMaxPrice||1200).toLocaleString('en-IN'));
     }catch(e){showToast('Not saved: '+e.message,6000,true);}finally{el.disabled=false;}
     return;
   }
   const value=Number(raw);
-  const other=key==='minPositionRs'?executionControls?.maxPositionRs:key==='maxPositionRs'?executionControls?.minPositionRs:null;
-  const valid=raw!==''&&Number.isFinite(value)&&(key==='screenerMaxPrice'?value>=5&&value<=1e6:isPos?Number.isInteger(value)&&value>=(key==='maxPositionRs'?1000:0)&&value<=1e8&&(other==null||(key==='minPositionRs'?value<=other:value>=other)):value>=0&&value<=100);
-  if(!valid){showToast(key==='screenerMaxPrice'?'Enter a screener max price from ₹5 to ₹10,00,000 (or clear for ₹1,200).':isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100% (or clear for auto).',5000,true);return;}
+  const other=key==='minPositionRs'?executionControls?.maxPositionRs:key==='maxPositionRs'?executionControls?.minPositionRs:key==='dayChangeMinPct'?executionControls?.dayChangeMaxPct:key==='dayChangeMaxPct'?executionControls?.dayChangeMinPct:null;
+  const valid=raw!==''&&Number.isFinite(value)&&(isDayBand?value>=-50&&value<=50&&(other==null||(key==='dayChangeMinPct'?value<=other:value>=other)):key==='screenerMaxPrice'?value>=5&&value<=1e6:isPos?Number.isInteger(value)&&value>=(key==='maxPositionRs'?1000:0)&&value<=1e8&&(other==null||(key==='minPositionRs'?value<=other:value>=other)):value>=0&&value<=100);
+  if(!valid){showToast(isDayBand?'Enter a Day Change % from -50 to +50 (Min must not exceed Max; clear for no limit).':key==='screenerMaxPrice'?'Enter a screener max price from ₹5 to ₹10,00,000 (or clear for ₹1,200).':isPos?'Enter whole rupees; Min position must not exceed Max position (Max at least ₹1,000).':'Enter a target addition from 0 to 100% (or clear for auto).',5000,true);return;}
   el.disabled=true;
   try{
     const payload=key==='targetExtraPct'?{targetExtraPct:value,targetExtraManual:true}:{[key]:value};
@@ -8573,7 +8579,7 @@ async function saveExecutionControl(key,el){
     if(!result?.ok)throw Error(result?.why||'Could not save execution control');
     executionControlDirty.delete(key);applyExecutionControls(result.controls);
     if(typeof applyFilters==='function')applyFilters({preservePage:true});
-    showToast(key==='minPositionRs'?'Min position: ₹'+value.toLocaleString('en-IN'):key==='maxPositionRs'?'Max position: ₹'+value.toLocaleString('en-IN'):key==='screenerMaxPrice'?'Screener max price: ₹'+value.toLocaleString('en-IN'):'Target addition (manual): +'+value+' percentage points');
+    showToast(isDayBand?(key==='dayChangeMinPct'?`Day % min: ${value>=0?'+':''}${value}% (all models)`:`Day % max: ${value>=0?'+':''}${value}% (all models)`):key==='minPositionRs'?'Min position: ₹'+value.toLocaleString('en-IN'):key==='maxPositionRs'?'Max position: ₹'+value.toLocaleString('en-IN'):key==='screenerMaxPrice'?'Screener max price: ₹'+value.toLocaleString('en-IN'):'Target addition (manual): +'+value+' percentage points');
   }catch(e){showToast('Not saved: '+e.message,6000,true);}finally{el.disabled=false;}
 }
 let lossFundingDirty=false;
