@@ -1,10 +1,11 @@
-# Active Task: Deployed v1797 / Operational
+# Active Task: Deployed v1798 / Operational
 
-Rocket Scanner v1797 deployed at 2026-11-26 09:18 IST. System operational and in sync with origin/master.
+Rocket Scanner v1798 deployed at 2026-11-26 09:42 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1798:** Retry profit-lock tracker saves after filesystem errors
 - **v1797:** Back up validated helper and guard startup syntax
 - **v1796:** Restore helper and guard syntax before launch
 - **v1795:** Gate each ratcheting stop by booked-profit funding
