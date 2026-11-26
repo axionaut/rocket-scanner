@@ -386,10 +386,10 @@ table.main.avwap-table td[data-key="symbol"]>div{max-width:100%!important}
 .mc-sub{font-size:13px;color:var(--t2);margin-top:3px}
 .mc-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .mc-table-wrap{overflow-x:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:12px}
-table.mc-matrix{width:100%;border-collapse:collapse;font-size:14px;min-width:780px}
-table.mc-matrix th,table.mc-matrix td{padding:12px 16px;border-bottom:1px solid var(--border);vertical-align:middle}
-table.mc-matrix thead th{background:var(--bg-raised);text-align:right;font-weight:700;color:var(--t1);cursor:default;width:19%}
-table.mc-matrix thead th:first-child{text-align:left;width:24%;color:var(--t2);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+table.mc-matrix{width:100%;table-layout:fixed;border-collapse:collapse;font-size:14px;min-width:920px}
+table.mc-matrix th,table.mc-matrix td{padding:12px 14px;border-bottom:1px solid var(--border);vertical-align:middle;word-wrap:break-word}
+table.mc-matrix thead th{background:var(--bg-raised);text-align:right;font-weight:700;color:var(--t1);cursor:default}
+table.mc-matrix thead th:first-child{text-align:left;width:18%;color:var(--t2);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
 table.mc-matrix thead th.mc-col-live{background:rgba(34,197,94,.08);box-shadow:inset 0 2px 0 var(--green)}
 table.mc-matrix tbody td{text-align:right;font-family:'DM Mono',monospace;font-variant-numeric:tabular-nums;color:var(--t1)}
 table.mc-matrix tbody td:first-child{text-align:left;font-family:inherit;font-weight:600;color:var(--t2)}

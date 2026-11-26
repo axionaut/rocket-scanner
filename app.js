@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 15:37 IST'; // release build date (IST)
-const APP_VERSION=1805;
+const BUILD_TS='2026-11-26 19:46 IST'; // release build date (IST)
+const APP_VERSION=1806;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -16838,10 +16838,11 @@ function renderModelComparison(){
     return;
   }
   const order=(Array.isArray(d.modelOrder)&&d.modelOrder.length?d.modelOrder:SELECTABLE_MODELS).filter(id=>d.models[id]);
-  const cols=order.map(id=>d.models[id]);
+  const cols=order.map(id=>d.models[id]).sort((a,b)=>(Number(a.rank)||999)-(Number(b.rank)||999)||(Number(b.totalNet)||0)-(Number(a.totalNet)||0));
+  const colW=cols.length?`${(82/cols.length).toFixed(2)}%`:'auto';
   const baselineRs=d.baseline?.startingCapital!=null?mcFmtRs(d.baseline.startingCapital):'—';
   const ctrlNote=d.controls?`Pos ₹${Math.round(d.controls.minPositionRs||0).toLocaleString('en-IN')}–₹${Math.round(d.controls.maxPositionRs||0).toLocaleString('en-IN')} · Trim budget ${d.controls.lossFundingPct!=null?d.controls.lossFundingPct+'%':'unset'}`:'';
-  const thCells=cols.map(c=>`<th class="${c.isLive?'mc-col-live':''}">`
+  const thCells=cols.map(c=>`<th class="${c.isLive?'mc-col-live':''}" style="width:${colW}">`
     +`<div class="mc-mname">${escHtml(c.shortName||c.name||c.id)}<span class="mc-rank">#${c.rank||'—'}</span></div>`
     +`<div class="mc-muted">${escHtml(c.name||'')}</div>`
     +`<span class="mc-badge ${c.isLive?'mc-badge-live':'mc-badge-paper'}">${c.isLive?'🟢 LIVE':'📄 PAPER'}</span>`
