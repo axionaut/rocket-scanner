@@ -1,10 +1,11 @@
-# Active Task: Deployed v1825 / Operational
+# Active Task: Deployed v1826 / Operational
 
-Rocket Scanner v1825 deployed at 2026-11-27 14:16 IST. System operational and in sync with origin/master.
+Rocket Scanner v1826 deployed at 2026-11-27 15:57 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1826:** Decouple local ATR stop from GTT 0.26% gap, remove downward re-anchor, enforce profitProtected IOC breakeven floor, and align backup GTT with frozen MLoT floor
 - **v1825:** Align MLoT Weighted % with rupee-proceeds weighting (matching Avoided %, no zero-day harmonic collapse)
 - **v1824:** Switch MLoT tracking and live/paper profit-hold timer to pre-reversal (-0.25%) body-high and dynamic p75
 - **v1823:** Wire dynamic completed-sessions MLoT body-median profit hold (-0.25% floor) into live/paper exits and UI

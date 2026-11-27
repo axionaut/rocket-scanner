@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 14:16 IST'; // release build date (IST)
-const APP_VERSION=1825;
+const BUILD_TS='2026-11-27 15:57 IST'; // release build date (IST)
+const APP_VERSION=1826;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -6052,7 +6052,8 @@ function exitCellHtml(s){
     const detail=Number(a?.initialAtr)>0?'Initial ATR ₹'+Number(a.initialAtr).toFixed(2)+'; current distance ₹'+Number(a.distance||0).toFixed(2):'Existing locked protection retained';
     const ph=p.profitHold&&p.profitHold.until>Date.now()?p.profitHold:null;
     const holdRem=ph?Math.max(1,Math.ceil((ph.until-Date.now())/60000)):0;
-    const holdTag=ph?` <span style="color:var(--amber);font-weight:700" title="MLoT pre-reversal p75 hold (${ph.delayMin}m): holding above -0.25% floor ₹${Number(ph.floor||0).toFixed(2)} until new high or timer expiry">· Hold ${holdRem}m (fl ₹${Number(ph.floor||0).toFixed(2)})</span>`:'';
+    const gttEarly=ph&&sl>Number(ph.floor||0)+1e-6?' (confirmed GTT above hold floor may fire earlier)':'';
+    const holdTag=ph?` <span style="color:var(--amber);font-weight:700" title="MLoT pre-reversal p75 hold (${ph.delayMin}m): holding above -0.25% floor ₹${Number(ph.floor||0).toFixed(2)} until new high or timer expiry${gttEarly}">· Hold ${holdRem}m (fl ₹${Number(ph.floor||0).toFixed(2)})</span>`:'';
     return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="${detail}; server stop rises on rebounds; this is the broker-confirmed trigger"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> <span style="color:var(--t3)">(${mode})</span>${holdTag}</div>`;
   }
   if(p.lossGttId&&p.lossGttQty>0&&p.lossGttTrigger>0&&!p.needsReconcile&&!p.lossUpdatePending)return `<span style="color:var(--amber)" title="Broker GTT covers ${p.lossGttQty} of ${p.qty} shares; its loss is reserved from booked profit">Funded SL ₹${Number(p.lossGttTrigger).toFixed(2)} · ${p.lossGttQty}/${p.qty}</span>`;
