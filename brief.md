@@ -1,10 +1,11 @@
-# Active Task: Deployed v1823 / Operational
+# Active Task: Deployed v1824 / Operational
 
-Rocket Scanner v1823 deployed at 2026-11-27 14:03 IST. System operational and in sync with origin/master.
+Rocket Scanner v1824 deployed at 2026-11-27 14:11 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1824:** Switch MLoT tracking and live/paper profit-hold timer to pre-reversal (-0.25%) body-high and dynamic p75
 - **v1823:** Wire dynamic completed-sessions MLoT body-median profit hold (-0.25% floor) into live/paper exits and UI
 - **v1822:** Use candle-body high max(O,C) and wick low for MLoT calculations
 - **v1821:** Prohibit selective hindsight dismissal and median-bias in AGENTS.md and CLAUDE.md

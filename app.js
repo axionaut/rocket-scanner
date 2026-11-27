@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 14:03 IST'; // release build date (IST)
-const APP_VERSION=1823;
+const BUILD_TS='2026-11-27 14:11 IST'; // release build date (IST)
+const APP_VERSION=1824;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -6052,7 +6052,7 @@ function exitCellHtml(s){
     const detail=Number(a?.initialAtr)>0?'Initial ATR ₹'+Number(a.initialAtr).toFixed(2)+'; current distance ₹'+Number(a.distance||0).toFixed(2):'Existing locked protection retained';
     const ph=p.profitHold&&p.profitHold.until>Date.now()?p.profitHold:null;
     const holdRem=ph?Math.max(1,Math.ceil((ph.until-Date.now())/60000)):0;
-    const holdTag=ph?` <span style="color:var(--amber);font-weight:700" title="MLoT body-median hold (${ph.delayMin}m): holding above -0.25% floor ₹${Number(ph.floor||0).toFixed(2)} until new high or timer expiry">· Hold ${holdRem}m (fl ₹${Number(ph.floor||0).toFixed(2)})</span>`:'';
+    const holdTag=ph?` <span style="color:var(--amber);font-weight:700" title="MLoT pre-reversal p75 hold (${ph.delayMin}m): holding above -0.25% floor ₹${Number(ph.floor||0).toFixed(2)} until new high or timer expiry">· Hold ${holdRem}m (fl ₹${Number(ph.floor||0).toFixed(2)})</span>`:'';
     return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="${detail}; server stop rises on rebounds; this is the broker-confirmed trigger"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> <span style="color:var(--t3)">(${mode})</span>${holdTag}</div>`;
   }
   if(p.lossGttId&&p.lossGttQty>0&&p.lossGttTrigger>0&&!p.needsReconcile&&!p.lossUpdatePending)return `<span style="color:var(--amber)" title="Broker GTT covers ${p.lossGttQty} of ${p.qty} shares; its loss is reserved from booked profit">Funded SL ₹${Number(p.lossGttTrigger).toFixed(2)} · ${p.lossGttQty}/${p.qty}</span>`;
@@ -8672,9 +8672,10 @@ function mlotHistoryHtml(){
   const th=(t,a='right',tip='')=>`<th style="padding:6px 10px;text-align:${a};white-space:nowrap"${tip?` title="${escHtml(tip)}"`:''}>${t}</th>`;
   const td=(v,c='var(--t2)',a='right')=>`<td style="padding:7px 10px;text-align:${a};white-space:nowrap;color:${c};font-family:'DM Mono',monospace">${v}</td>`;
   const row=s=>`<tr>${td(s.day+(s.proxyStocks?' (NSE proxy)':''),'var(--t1)','left')}${td(s.fills)}${td(s.stocks+(s.unknownStocks?' ('+s.coveredStocks+' covered)':''))}${td(rs(s.totalRs),'var(--red)')}${td(pc(s.medianPct),'var(--red)')}${td(rs(s.savedRs),'var(--green)')}${td(pc(daySavedPct(s)),'var(--green)')}${td(mins(s.medianPeakDelayMin))}</tr>`;
-  const total=`<tr style="border-top:1px solid var(--border);font-weight:700">${td(`Total (${days.length} days)`,'var(--t2)','left')}${td(sum('fills'))}${td(sum('stocks'))}${td(rs(sum('totalRs')),'var(--red)')}${td(weightedMedianHtml,'var(--red)')}${td(rs(sum('savedRs')),'var(--green)')}${td(totSavedPct==null?'—':'Weighted '+pc(totSavedPct),'var(--green)')}${td(midDelay==null?'—':'Median '+mins(midDelay))}</tr>`;
+  const liveHoldMin=Number(PROFIT_LOCK_STATUS?.mlotHistory?.completedPeakDelayMin);
+  const total=`<tr style="border-top:1px solid var(--border);font-weight:700">${td(`Total (${days.length} days)`,'var(--t2)','left')}${td(sum('fills'))}${td(sum('stocks'))}${td(rs(sum('totalRs')),'var(--red)')}${td(weightedMedianHtml,'var(--red)')}${td(rs(sum('savedRs')),'var(--green)')}${td(totSavedPct==null?'—':'Weighted '+pc(totSavedPct),'var(--green)')}${td(liveHoldMin>0?'Hold p75 +'+liveHoldMin+'m':(midDelay==null?'—':'Median '+mins(midDelay)))}</tr>`;
   return `<div style="margin-top:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden"><div style="padding:10px 16px 4px;font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">MLoT history <span style="font-weight:400;color:var(--t3);text-transform:none;letter-spacing:0">helper record, one row per session</span></div>
-    <div style="padding:0 16px 6px;color:var(--t3);font-size:12px">Left on table = rise above each sale price to its later same-day candle-body high max(O,C). Downside avoided = fall below each sale price to its later same-day wick low. Both tables use the same recorded fills and one-minute observations. BSE sales use NSE prices when BSE prices are unavailable (NSE proxy). Missing observations are excluded from amounts. Medians are per covered stock.</div>
+    <div style="padding:0 16px 6px;color:var(--t3);font-size:12px">Left on table = rise above each sale price to its pre-reversal candle-body high max(O,C) before a -0.25% wick-low breach. Downside avoided = fall below each sale price to its later same-day wick low. Both tables use the same recorded fills and one-minute observations. BSE sales use NSE prices when BSE prices are unavailable (NSE proxy). Missing observations are excluded from amounts. Medians are per covered stock; live profit-hold timer uses completed-session pre-reversal p75.</div>
     <div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr style="font-size:12px;text-transform:uppercase;color:var(--t3)">${th('Day','left')}${th('Sales')}${th('Stocks')}${th('Left on table ₹')}${th('Median %')}${th('Downside avoided ₹')}${th('Avoided %')}${th('Median peak delay')}</tr></thead><tbody>${days.map(row).join('')}${total}</tbody></table></div></div>`;
 }
 // 19 Oct: the helper's reconciled weighted cost of lots held at today's open. Zerodha's holdings average is
