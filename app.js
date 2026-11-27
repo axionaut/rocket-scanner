@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 12:15 IST'; // release build date (IST)
-const APP_VERSION=1816;
+const BUILD_TS='2026-11-27 12:17 IST'; // release build date (IST)
+const APP_VERSION=1817;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -6017,6 +6017,28 @@ function tvScreenerCell(s,key){
   }
   return none;
 }
+function wave3TableCell(s,key){
+  const sym=normSym(s?.symbol),src=btstRanking()?.src;
+  const sig=src?.activeModel==='WAVE3_1M'?src.wave3?.signals?.[sym]:null;
+  const watch=src?.activeModel==='WAVE3_1M'?src.watchlist?.[sym]:null;
+  const none='<span style="color:var(--t3)">—</span>';
+  if(key==='wave3Smc'){
+    const smc=watch?.smc;
+    if(!smc||!smc.tag)return none;
+    const clr=smc.ok?'var(--green)':'var(--red)';
+    const bg=smc.ok?'rgba(16,185,129,.12)':'rgba(239,68,68,.12)';
+    const tip=smc.reason||smc.tag;
+    return `<span style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:${clr};background:${bg};padding:2px 6px;border-radius:4px;white-space:nowrap" title="${escHtml(tip)}">${escHtml(smc.tag)}</span>`;
+  }
+  if(key==='wave3Info'){
+    if(!sig||!(sig.rank>0))return none;
+    const w=sig.wave?`W${sig.wave}`:'W?';
+    const bar=sig.barKey?String(sig.barKey).slice(11,16):'—';
+    const tip=`${src?.wave3?.waveName||w} · Rank #${sig.rank} · Completed signal bar ${sig.barKey||'—'}`;
+    return `<div style="font-family:'DM Mono',monospace;font-size:12px;white-space:nowrap" title="${escHtml(tip)}"><span style="color:var(--t1);font-weight:700">${w} #${sig.rank}</span> <span style="color:var(--t3)">· ${escHtml(bar)}</span></div>`;
+  }
+  return none;
+}
 // Owner 19 Nov 2026: show confirmed broker protection, never imply a local draft is active.
 function exitCellHtml(s){
   const p=PROFIT_LOCK_STATUS.bySym.get(normSym(s.symbol));
@@ -11126,6 +11148,12 @@ function getCols(){
     {key:'tvRatings',label:'1m / 5m / 15m / 1D',s:1},{key:'tvFilters',label:'RelVol · Sh · 30m>=VWAP',s:1},
     {key:'exit',label:'ATR SL / Ratchet',s:0},{key:'alloc',label:'Allocation',s:1}
   ];
+  if(floorModel()==='WAVE3_1M')return [
+    {key:'status',label:'Status',s:1},{key:'score',label:'Wave z-Score',s:1},
+    {key:'symbol',label:'Symbol',s:1},{key:'price',label:'Price · Day %',s:1},
+    {key:'wave3Smc',label:'SMC 5m',s:1},{key:'wave3Info',label:'Wave · Rank · Bar',s:1},
+    {key:'alloc',label:'Allocation',s:1}
+  ];
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     // v1581 (owner 28 Oct): only what the buy/exit decisions use. From High, Buyer/Seller, RelVol, Turnover and the
@@ -12863,6 +12891,8 @@ function renderTable(){
       vwapGap:`<td data-key="vwapGap">${avwapTableCell(s,'vwapGap')}</td>`,
       tvRatings:`<td data-key="tvRatings">${tvScreenerCell(s,'tvRatings')}</td>`,
       tvFilters:`<td data-key="tvFilters">${tvScreenerCell(s,'tvFilters')}</td>`,
+      wave3Smc:`<td data-key="wave3Smc">${wave3TableCell(s,'wave3Smc')}</td>`,
+      wave3Info:`<td data-key="wave3Info">${wave3TableCell(s,'wave3Info')}</td>`,
       score:`<td data-key="score" style="text-align:center">${dualScoreCell(s)}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
@@ -12995,6 +13025,8 @@ function sortValueOf(row,key){
   if(['sessionVwap','anchoredVwap','vwapGap'].includes(key)){const v=avwapTableSignal(row);return key==='sessionVwap'?v?.vwap??null:key==='anchoredVwap'?v?.avwap??null:v?.avwap>0?100*(v.vwap/v.avwap-1):null;}
   if(key==='tvRatings'){const d=tvScreenerDetail(row);return d?Number(d.ratingsPassedCount):null;}
   if(key==='tvFilters'){const d=tvScreenerDetail(row);return d&&Number.isFinite(d.relVolAtTime)?d.relVolAtTime:null;}
+  if(key==='wave3Smc'){const smc=btstRanking()?.src?.watchlist?.[normSym(row?.symbol)]?.smc;return smc?(smc.ok?1:0):null;}
+  if(key==='wave3Info'){const rk=btstRanking()?.src?.wave3?.signals?.[normSym(row?.symbol)]?.rank;return Number.isFinite(rk)?rk:null;}
   if(!row) return null;
   // `Number(undefined) ?? null` is NaN, not null - and one NaN makes every comparison against it
   // false, which silently scrambles the whole sort. Every numeric path returns null or a finite
@@ -14307,6 +14339,7 @@ function patchVisiblePrices(){
       const crossCell=tr.querySelector('td[data-key="cross"]');if(crossCell)crossCell.innerHTML=crossCellHtml(s);
       if(floorModel()==='AVWAP_CROSS')for(const key of ['sessionVwap','anchoredVwap','vwapGap']){const cell=tr.querySelector('td[data-key="'+key+'"]');if(cell)cell.innerHTML=avwapTableCell(s,key);}
       if(floorModel()==='TV_SCREENER')for(const key of ['tvRatings','tvFilters']){const cell=tr.querySelector('td[data-key="'+key+'"]');if(cell)cell.innerHTML=tvScreenerCell(s,key);}
+      if(floorModel()==='WAVE3_1M')for(const key of ['wave3Smc','wave3Info']){const cell=tr.querySelector('td[data-key="'+key+'"]');if(cell)cell.innerHTML=wave3TableCell(s,key);}
       const exitCell=tr.querySelector('td[data-key="exit"]');if(exitCell)exitCell.innerHTML=exitCellHtml(s);
       const signals=strategySignalCells(s);
       for(const [key,value] of Object.entries({highDistance:signals.highDistance,depth:signals.depth,relvol:signals.rvol,turnover:fV(s.turnover)})){const cell=tr.querySelector('td[data-key="'+key+'"]');if(cell)cell.innerHTML=value;}
