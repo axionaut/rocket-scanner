@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 13:37 IST'; // release build date (IST)
-const APP_VERSION=1821;
+const BUILD_TS='2026-11-27 13:53 IST'; // release build date (IST)
+const APP_VERSION=1822;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8671,7 +8671,7 @@ function mlotHistoryHtml(){
   const row=s=>`<tr>${td(s.day+(s.proxyStocks?' (NSE proxy)':''),'var(--t1)','left')}${td(s.fills)}${td(s.stocks+(s.unknownStocks?' ('+s.coveredStocks+' covered)':''))}${td(rs(s.totalRs),'var(--red)')}${td(pc(s.medianPct),'var(--red)')}${td(rs(s.savedRs),'var(--green)')}${td(pc(daySavedPct(s)),'var(--green)')}${td(mins(s.medianPeakDelayMin))}</tr>`;
   const total=`<tr style="border-top:1px solid var(--border);font-weight:700">${td(`Total (${days.length} days)`,'var(--t2)','left')}${td(sum('fills'))}${td(sum('stocks'))}${td(rs(sum('totalRs')),'var(--red)')}${td(weightedMedianHtml,'var(--red)')}${td(rs(sum('savedRs')),'var(--green)')}${td(totSavedPct==null?'—':'Weighted '+pc(totSavedPct),'var(--green)')}${td(midDelay==null?'—':'Median '+mins(midDelay))}</tr>`;
   return `<div style="margin-top:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden"><div style="padding:10px 16px 4px;font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">MLoT history <span style="font-weight:400;color:var(--t3);text-transform:none;letter-spacing:0">helper record, one row per session</span></div>
-    <div style="padding:0 16px 6px;color:var(--t3);font-size:12px">Left on table = rise above each sale price to its later same-day high. Downside avoided = fall below each sale price to its later same-day low. Both tables use the same recorded fills and one-minute observations. BSE sales use NSE prices when BSE prices are unavailable (NSE proxy). Missing observations are excluded from amounts. Medians are per covered stock. Hindsight measures for review only, not executable profit.</div>
+    <div style="padding:0 16px 6px;color:var(--t3);font-size:12px">Left on table = rise above each sale price to its later same-day candle-body high max(O,C). Downside avoided = fall below each sale price to its later same-day wick low. Both tables use the same recorded fills and one-minute observations. BSE sales use NSE prices when BSE prices are unavailable (NSE proxy). Missing observations are excluded from amounts. Medians are per covered stock.</div>
     <div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr style="font-size:12px;text-transform:uppercase;color:var(--t3)">${th('Day','left')}${th('Sales')}${th('Stocks')}${th('Left on table ₹')}${th('Median %')}${th('Downside avoided ₹')}${th('Avoided %')}${th('Median peak delay')}</tr></thead><tbody>${days.map(row).join('')}${total}</tbody></table></div></div>`;
 }
 // 19 Oct: the helper's reconciled weighted cost of lots held at today's open. Zerodha's holdings average is

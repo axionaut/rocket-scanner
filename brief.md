@@ -1,10 +1,11 @@
-# Active Task: Deployed v1821 / Operational
+# Active Task: Deployed v1822 / Operational
 
-Rocket Scanner v1821 deployed at 2026-11-27 13:37 IST. System operational and in sync with origin/master.
+Rocket Scanner v1822 deployed at 2026-11-27 13:53 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1822:** Use candle-body high max(O,C) and wick low for MLoT calculations
 - **v1821:** Prohibit selective hindsight dismissal and median-bias in AGENTS.md and CLAUDE.md
 - **v1820:** Add Downside Avoided % column to Latest Session and MLoT History tables
 - **v1819:** Sync Methodology filter tables with configurable Day % band (hide when no limits set)
