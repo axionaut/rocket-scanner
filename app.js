@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 12:40 IST'; // release build date (IST)
-const APP_VERSION=1818;
+const BUILD_TS='2026-11-27 13:09 IST'; // release build date (IST)
+const APP_VERSION=1819;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10650,9 +10650,12 @@ function buildHardFilterMethodologyHTML(E){
   const modelName=BTST_MODEL_NAMES?.[floorModel()]||floorModel(),op=currentFilterOpportunity();
   const modes=`<div class="filter-view"><button class="btn ${SURV_TABLE_MODE==='opportunity'?'active':''}" onclick="setSurvTableMode('opportunity')">Blocked stocks · today</button><button class="btn ${SURV_TABLE_MODE==='model'?'active':''}" onclick="setSurvTableMode('model')">${escHtml(modelName)} signals</button></div>`;
   if(SURV_TABLE_MODE==='model')return `<div class="filter-heading"><div><h3>Model-qualified filter evidence</h3><p>Actual recorded model qualifications with one rule removed; other entry checks still apply.</p></div>${modes}</div>`+buildModelFilterEvidenceHTML(E);
-  const dayBandFlagged=ALL.filter(s=>typeof RocketStrategy!=='undefined'&&RocketStrategy.dayChangeBandReason(s.day)).length;
+  const dMin=executionControls?.dayChangeMinPct,dMax=executionControls?.dayChangeMaxPct;
+  const hasDayBand=dMin!=null||dMax!=null;
+  const dayBandLabel=hasDayBand?`Universal: Day change outside ${dMin!=null?dMin+'%':'no min'} to ${dMax!=null?(dMax>=0?'+':'')+dMax+'%':'no max'}`:'';
+  const dayBandFlagged=hasDayBand?ALL.filter(s=>typeof RocketStrategy!=='undefined'&&RocketStrategy.dayChangeBandReason(s.day,{minPct:dMin,maxPct:dMax})).length:0;
   const rows=[
-    {ruleKey:'universal_day_band',criteria:'Universal: Day change outside -3% to +2%',flagged:dayBandFlagged,net:null,per5000:null,gains:null,losses:null,allNet:null,samples:0,missing:0,allSamples:0,impact:0,builtin:true},
+    ...(hasDayBand?[{ruleKey:'universal_day_band',criteria:dayBandLabel,flagged:dayBandFlagged,net:null,per5000:null,gains:null,losses:null,allNet:null,samples:0,missing:0,allSamples:0,impact:0,builtin:true}]:[]),
     ...getSurvRules().map(rule=>{const b=op?.byRule?.[rule.key];return {ruleKey:rule.key,criteria:rule.column||rule.label,flagged:b?.flagged??SURV_RULE_HITS[rule.key]??0,net:b?.soleSamples?b.soleNet:null,per5000:b?.solePer5000??null,gains:b?.soleSamples?b.soleGains:null,losses:b?.soleSamples?-b.soleLosses:null,allNet:b?.samples?b.net:null,samples:b?.soleSamples||0,missing:b?.soleMissing||0,allSamples:b?.samples||0,impact:Math.abs(b?.soleNet||0)};})
   ];
   const money=v=>v==null?'&mdash;':`<span class="filter-money" style="color:${v>0?'var(--green)':v<0?'var(--red)':'var(--t3)'}">${fmtSignedINR(v)}</span>`;
@@ -10692,9 +10695,12 @@ function buildModelFilterEvidenceHTML(E){
 
   // Marginal forward observations, kept separate from real account P&L.
   const fileRuleKeys=new Set((SURV_FILE_RULES||[]).map(r=>r.key));
-  const dayBandFlaggedM=ALL.filter(s=>typeof RocketStrategy!=='undefined'&&RocketStrategy.dayChangeBandReason(s.day)).length;
+  const dMinM=executionControls?.dayChangeMinPct,dMaxM=executionControls?.dayChangeMaxPct;
+  const hasDayBandM=dMinM!=null||dMaxM!=null;
+  const dayBandLabelM=hasDayBandM?`Universal: Day change outside ${dMinM!=null?dMinM+'%':'no min'} to ${dMaxM!=null?(dMaxM>=0?'+':'')+dMaxM+'%':'no max'}`:'';
+  const dayBandFlaggedM=hasDayBandM?ALL.filter(s=>typeof RocketStrategy!=='undefined'&&RocketStrategy.dayChangeBandReason(s.day,{minPct:dMinM,maxPct:dMaxM})).length:0;
   const hfRows=[
-    {criteria:'Universal: Day change outside -3% to +2%',flagged:dayBandFlaggedM,missed:null,avoided:null,net:null,samples:0,open:0,unresolved:0,verdict:null,active:true,ruleKey:'universal_day_band',inactiveNote:'',builtin:true},
+    ...(hasDayBandM?[{criteria:dayBandLabelM,flagged:dayBandFlaggedM,missed:null,avoided:null,net:null,samples:0,open:0,unresolved:0,verdict:null,active:true,ruleKey:'universal_day_band',inactiveNote:'',builtin:true}]:[]),
     ...getSurvRules().map(rule=>{
     const cost=SURV_COST_STATUS?.ok?SURV_COST_STATUS.byRule?.[rule.key]:null;
     const active=!SURV_HEADERS.length||fileRuleKeys.has(rule.key);

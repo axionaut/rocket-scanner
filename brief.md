@@ -1,10 +1,11 @@
-# Active Task: Deployed v1818 / Operational
+# Active Task: Deployed v1819 / Operational
 
-Rocket Scanner v1818 deployed at 2026-11-27 12:40 IST. System operational and in sync with origin/master.
+Rocket Scanner v1819 deployed at 2026-11-27 13:09 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1819:** Sync Methodology filter tables with configurable Day % band (hide when no limits set)
 - **v1818:** Show live SMC 5m badges for top 50 3-Wave stocks all day and clear reason tags in Open Positions Model Score
 - **v1817:** Add dedicated SMC 5m and Wave/Rank/Bar columns for 3-Wave 1m in Rankings table
 - **v1816:** Add Open Positions model-score reason tooltip, UI table sync protocol, and keep 3-Wave scores visible during minute rollover
