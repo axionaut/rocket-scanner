@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-26 20:30 IST'; // release build date (IST)
-const APP_VERSION=1814;
+const BUILD_TS='2026-11-27 11:15 IST'; // release build date (IST)
+const APP_VERSION=1815;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -2471,6 +2471,7 @@ function useNextSessionBand(change){
 function getNSEBandRecord(symbol){
   const sym=normSym(symbol),base=NSE_PRICE_BAND[sym],change=NSE_NEXT_BAND[sym];
   if(change){
+    if(base?.bandPct===change.toPct)return {...base,change};
     const next=useNextSessionBand(change);
     return {bandPct:next?change.toPct:change.fromPct,remarks:next?`Next-session band changed ${change.fromPct}% to ${change.toPct}%`:`Band changes to ${change.toPct}% next session`,change};
   }
@@ -4685,7 +4686,7 @@ function initScoreFloorUI(force=false){
       const mp=document.getElementById('fScreenerMaxPrice');
       if(mp&&!executionControlDirty.has('screenerMaxPrice')&&document.activeElement!==mp)mp.value=getScreenerMaxPrice();
     }
-    if(model==='AVWAP_CROSS'||model==='TV_SCREENER'||model==='WAVE3_1M'){if(el){el.value='1';el.readOnly=true;}_scoreFloorSeeded=model;updateModeUI();return;}
+    if(model==='AVWAP_CROSS'||model==='TV_SCREENER'||model==='WAVE3_1M'){if(el){el.value=model==='WAVE3_1M'?'0':'1';el.readOnly=true;}_scoreFloorSeeded=model;updateModeUI();return;}
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     el.readOnly=model==='MARKOV_3PCT';
     if(model==='MARKOV_3PCT'){
@@ -5258,7 +5259,8 @@ function btstEngineMinScore(){
 }
 // What the screen judges against: the override when typed, otherwise the engine's own floor.
 function btstMinScore(){
-  if(floorModel()==='AVWAP_CROSS'||floorModel()==='TV_SCREENER'||floorModel()==='WAVE3_1M')return 1;
+  if(floorModel()==='AVWAP_CROSS'||floorModel()==='TV_SCREENER')return 1;
+  if(floorModel()==='WAVE3_1M')return 0;
   if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
   if(floorModel()==='MARKOV_3PCT'){
     return BTST.data?.selection?.cutoff??BTST.rank?.selection?.cutoff??0;
@@ -5507,10 +5509,19 @@ function getRowActionState(s){
   const quote=_universeMap.get(s.symbol), priceAt=quote?.priceAt, priceSource=quote?.priceSource, tickAt=_universeTickAt, universeRev=_clientUniverseRev;
   const ctrlMin=typeof executionControls!=='undefined'&&executionControls?Number(executionControls.minPositionRs)||0:null;
   const turnKey=ctrlMin!=null?Math.floor((Number(s.turnover)||0)/1000):0;
-  const safety=_streamConfirmed+':'+_freshEvidenceAfter+':'+BTST.v+':'+btstMinScore()+':'+(typeof TRADEBOOK_BUY_FILLS==='undefined'?0:TRADEBOOK_BUY_FILLS.length)+':'+(ctrlMin??''),heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
+  const safety=_streamConfirmed+':'+_freshEvidenceAfter+':'+BTST.v+':'+btstMinScore()+':'+(typeof TRADEBOOK_BUY_FILLS==='undefined'?0:TRADEBOOK_BUY_FILLS.length)+':'+(ctrlMin??'')+':'+(AUTO_BUY_ENABLED?AUTO_BUY_STATUS.at:0),heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
   const cached=ROW_ACTION_MEMO.get(s);
   if(cached&&cached.safety===safety&&cached.heldQty===heldQty&&cached.turnKey===turnKey&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.pcKey===pcKey&&cached.bandKey===bandKey&&cached.bookRev===bookRev&&cached.priceAt===priceAt&&cached.priceSource===priceSource&&cached.tickAt===tickAt&&cached.universeRev===universeRev) return cached.value;
-  const value=_getRowActionStateUncached(s);
+  let value=_getRowActionStateUncached(s);
+  if(value.state==='GO'&&AUTO_BUY_ENABLED&&AUTO_BUY_STATUS.nativeFundedMode&&SELECTABLE_MODELS.includes(floorModel())){
+    const model=floorModel(),intent=AUTO_BUY_STATUS.funded?.get(model+':'+normSym(s.symbol));
+    if(model==='WAVE3_1M'&&AUTO_BUY_STATUS.waveFilled&&AUTO_BUY_STATUS.wave===btstRanking()?.src?.wave3?.wave){
+      value={...value,state:'WAIT',reason:'This wave already has a confirmed fill'};
+    }else if(!intent||Date.now()>=intent.expiresAt){
+      const cash=getKiteAvailableCash(),min=Number(executionControls?.minPositionRs)||0;
+      value={...value,state:'WAIT',reason:cash!=null&&cash<min?'Available Kite cash is below the minimum position':'Awaiting a funded IOC reservation'};
+    }
+  }
   ROW_ACTION_MEMO.set(s,{safety,heldQty,turnKey,a,b,c,d,e,score,px,pcKey,bandKey,bookRev,priceAt,priceSource,tickAt,universeRev,value});
   return value;
 }
@@ -8675,6 +8686,10 @@ async function loadAutoBuyStatus(){
     at: j.asOf || Date.now(),
     mode: j.mode || (j.apiOrdersAllowed ? 'api' : 'gtt-dip'),
     bridgeEntries: Array.isArray(j.bridgeEntries) ? j.bridgeEntries : [],
+    nativeFundedMode: j.nativeFundedMode === true,
+    wave: j.wave,
+    waveFilled: j.waveFilled === true,
+    funded: new Map((Array.isArray(j.bridgeEntries)?j.bridgeEntries:[]).filter(r=>r.transactionType==='BUY'&&r.kind==='crossing'&&['queued','claimed','checking','submitting'].includes(r.status)).map(r=>[r.model+':'+r.sym,r])),
     blockedWhy: (j.apiOrdersAllowed === false && !j.mode && j.why) ? String(j.why) : ''
   };
   if (AUTO_BUY_STATUS.enabled !== AUTO_BUY_ENABLED) {
@@ -16861,12 +16876,12 @@ function renderModelComparison(){
     sep('Capital & Return'),
     row('Starting Capital',c=>mcFmtRs(c.startingCapital),'Equal capital baseline captured from live equity (cash + holdings) at start.'),
     row('Current Equity',c=>{const sub=c.isLive&&c.brokerEquity!=null&&Math.abs(c.brokerEquity-c.equity)>=1?`<span class="mc-subline">Broker ${mcFmtRs(c.brokerEquity)}</span>`:'';return `<strong style="color:var(--t1)">${mcFmtRs(c.equity)}</strong>${sub}`;},'Equal-baseline equity (Starting Capital + Total Net P&L). For the LIVE model, raw Kite equity is shown below if capital was added/carried.'),
-    row('Free Cash',c=>c.isLive&&c.tradableCash!=null&&c.unsettledCash>=1?`${mcFmtRs(c.cash)}<span class="mc-subline">${mcFmtRs(c.tradableCash)} broker free · ${mcFmtRs(c.unsettledCash)} T+1 unsettled</span>`:mcFmtRs(c.cash),'Total uninvested cash + T+1 unsettled sale proceeds (broker tradable balance shown separately when holding sales are pending settlement).'),
+    row('Free Cash',c=>c.cash==null?'—':mcFmtRs(c.cash),'Kite tradable cash for LIVE and uninvested simulation cash for Paper.'),
     row('Deployed Capital',c=>mcFmtRs(c.deployedValue)),
     row('Total Net P&L',c=>`<strong style="color:${mcPnlColor(c.totalNet)}">${mcFmtRs(c.totalNet,true)} (${mcFmtPct(c.returnPct,true)})</strong>`,'Total mark-to-market change since comparison baseline after realized charges.'),
-    row("Today's P&L",c=>{const tn=Number(c.todayNet||0),tp=Number(c.todayReturnPct||0),tr=Number(c.todayRealizedNet||0);const sub=(c.todayTrades>0||Math.abs(tr)>=1)?`<span class="mc-subline">Realized ${mcFmtRs(tr,true)}${c.todayTrades?` · ${c.todayTrades} trade${c.todayTrades>1?'s':''}`:''}</span>`:'';return `<strong style="color:${mcPnlColor(tn)}">${mcFmtRs(tn,true)} (${mcFmtPct(tp,true)})</strong>${sub}`;},"Today's mark-to-market net P&L since prior session close (or start of day)."),
+    row("Today's P&L",c=>{if(c.todayNet==null)return '<span class="mc-muted">—</span>';const tn=Number(c.todayNet),tp=Number(c.todayReturnPct||0),tr=Number(c.todayRealizedNet||0);const sub=(c.todayTrades>0||Math.abs(tr)>=1)?`<span class="mc-subline">Realized ${mcFmtRs(tr,true)}${c.todayTrades?` · ${c.todayTrades} trade${c.todayTrades>1?'s':''}`:''}</span>`:'';return `<strong style="color:${mcPnlColor(tn)}">${mcFmtRs(tn,true)} (${mcFmtPct(tp,true)})</strong>${sub}`;},"Net P&L since the previous session's observed close, or the comparison baseline if started later."),
     row('Realized Net P&L',c=>{const sm=Number(c.switchMtmNet||0);const sub=Math.abs(sm)>=1?`<span class="mc-subline">Trades ${mcFmtRs(c.closedTradesNet,true)} · Switch MTM ${mcFmtRs(sm,true)}</span>`:'';return `<span style="color:${mcPnlColor(c.realizedNet)}">${mcFmtRs(c.realizedNet,true)}</span>${sub}`;},'Net realized P&L after charges (including any open-position mark-to-market booked on a strategy switch so Realized + Open = Total Net P&L).'),
-    row('Open P&L',c=>`<span style="color:${mcPnlColor(c.openNet)}">${mcFmtRs(c.openNet,true)}</span>`),
+    row('Open P&L',c=>{const sub=c.isLive&&c.openPositions>0&&c.openGrossPnl!=null?`<span class="mc-subline">Gross ${mcFmtRs(c.openGrossPnl,true)} · Est. buy charges ${mcFmtRs(c.openBuyCharges)}</span>`:'';return `<span style="color:${mcPnlColor(c.openNet)}">${mcFmtRs(c.openNet,true)}</span>${sub}`;}),
     sep('Trades & Risk'),
     row('Open Positions',c=>String(c.openPositions||0)),
     row('Avg Position Size',c=>{if(c.avgPositionSize==null)return '<span class="mc-muted">—</span>';const sub=c.avgOpenPosSize!=null&&c.avgClosedTradeSize!=null?`<span class="mc-subline">Closed avg ${mcFmtRs(c.avgClosedTradeSize)}</span>`:(c.avgOpenPosSize==null&&c.avgClosedTradeSize!=null?'<span class="mc-subline">from closed trades</span>':'');return `${mcFmtRs(c.avgPositionSize)}${sub}`;},'Average rupee size per open position (falls back to closed-trade average when flat).'),
@@ -16890,7 +16905,8 @@ function renderModelComparison(){
       +`<div>`
         +`<div class="mc-title">⚖ Live vs Paper Model Comparison</div>`
         +`<div class="mc-sub">Started <b>${escHtml(mcFmtTime(d.startedAt))}</b> (all fills &amp; marks tracked from baseline onward) · Seed capital <b>${baselineRs}</b> (live cash ${mcFmtRs(d.baseline?.cash)} + holdings ${mcFmtRs(d.baseline?.holdingsValue)}) · ${escHtml(ctrlNote)}</div>`
-        +(d.exitPolicyChange?.at?`<div class="mc-sub">Shared rebound ratchet from <b>${escHtml(mcFmtTime(d.exitPolicyChange.at))}</b>${d.exitPolicyChange.priorResultsPreserved?' · Earlier results retain their original exit rules; baseline preserved.':''} Paper exits use received live quotes and simulated fills.</div>`:'')
+        +(d.exitPolicyChange?.at?`<div class="mc-sub">Shared ATR exit policy from <b>${escHtml(mcFmtTime(d.exitPolicyChange.at))}</b>${d.exitPolicyChange.priorResultsPreserved?' · Earlier results retain their original exit rules; baseline preserved.':''} Paper exits use received live quotes and simulated fills.</div>`:'')
+        +(d.exchangeBandEnforcedAt&&d.startedAt<d.exchangeBandEnforcedAt?`<div class="mc-sub">Trades before ${escHtml(mcFmtTime(d.exchangeBandEnforcedAt))} used the earlier price-band checks.</div>`:'')
       +`</div>`
       +`<div class="mc-actions">`
         +`<span class="mc-muted">Updated ${escHtml(mcFmtTime(d.asOf))}</span>`
