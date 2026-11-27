@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 14:11 IST'; // release build date (IST)
-const APP_VERSION=1824;
+const BUILD_TS='2026-11-27 14:16 IST'; // release build date (IST)
+const APP_VERSION=1825;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8664,7 +8664,7 @@ function mlotHistoryHtml(){
   const mins=v=>Number.isFinite(v)?'+'+(Number.isInteger(v)?v:v.toFixed(1))+'m':'—';
   const sum=k=>days.reduce((n,s)=>n+(Number(s[k])||0),0);
   const weightedMedian=RocketStrategy.weightedMlotMedian(days);
-  const weightedMedianHtml=weightedMedian==null?'—':`<span title="Covered-stock-weighted harmonic mean of daily medians. Lower medians receive higher weight. Covered zero medians make the mean zero.">Weighted ${pc(weightedMedian)}</span>`;
+  const weightedMedianHtml=weightedMedian==null?'—':`<span title="Rupee-proceeds-weighted MLoT % across all covered sales (Total Left on Table ₹ / Total Sale Proceeds ₹); matches Avoided % weighting.">Weighted ${pc(weightedMedian)}</span>`;
   const daySavedPct=s=>(Number(s.proceedsRs)>0&&Number.isFinite(Number(s.savedRs)))?(Number(s.savedRs)/Number(s.proceedsRs))*100:null;
   const totProceeds=sum('proceedsRs'),totSavedPct=totProceeds>0?(sum('savedRs')/totProceeds)*100:null;
   const delays=days.map(s=>s.medianPeakDelayMin).filter(Number.isFinite).sort((a,b)=>a-b);

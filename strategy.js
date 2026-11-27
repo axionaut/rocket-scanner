@@ -165,13 +165,19 @@
   // (existing holding + this order) never exceeds it. The count of names follows from cash / limits.
   // Opportunity-swap buys keep their own funding rules and do not use these limits.
   function weightedMlotMedian(sessions) {
+    const valid=(sessions||[]).filter(s=>s&&Number.isFinite(Number(s.totalRs))&&Number(s.proceedsRs)>0);
+    if(valid.length){
+      const totRs=valid.reduce((n,s)=>n+Number(s.totalRs),0);
+      const totProc=valid.reduce((n,s)=>n+Number(s.proceedsRs),0);
+      if(totProc>0)return (totRs/totProc)*100;
+    }
+    // Fallback for legacy fixtures lacking proceedsRs: covered-stock-weighted mean
     const medians=(sessions||[]).map(s=>({median:s.medianPct,
       count:Number.isFinite(s.coveredStocks)?s.coveredStocks:Number(s.stocks)-Number(s.unknownStocks||0)}))
       .filter(s=>Number.isFinite(s.median)&&s.median>=0&&Number.isFinite(s.count)&&s.count>0);
     if(!medians.length)return null;
-    const lowest=Math.min(...medians.map(s=>s.median));
-    if(lowest===0)return 0;
-    return lowest*medians.reduce((n,s)=>n+s.count,0)/medians.reduce((n,s)=>n+s.count*(lowest/s.median),0);
+    const wSum=medians.reduce((n,s)=>n+s.count,0);
+    return wSum>0?medians.reduce((n,s)=>n+s.median*s.count,0)/wSum:null;
   }
 
   function positionLimits(account) {
