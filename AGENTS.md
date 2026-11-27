@@ -155,3 +155,10 @@
   4. **Latest Session / Performance**, **Compare tab**, and **Methodology tab** all reflect the current model, filters, score scale, and exit/funding rules.
   5. Verify live server-side Auto-Buy (`autoTrigger*Buy`), `readBtstMinScore`, and `bridge-entry.cjs` `quoteTtl` stay aligned with the UI.
 
+## Strict Prohibition on Selective "Hindsight" Dismissal & Median-Bias - owner, 27 November 2026
+
+- **Never selectively cry "hindsight" or "hindsight trap" to shoot down data or hypotheses that show higher profit.** Every backtest uses historical data; selectively labeling a profitable finding "hindsight" while accepting other historical backtests is prohibited.
+- **Test causally instead of dismissing:** When an observed historical metric (e.g., MLoT Peak Delay, post-exit drift, entry timing) points to potential extra profit, immediately run a causal forward test on the recorded 1-minute paths (`Scanner Uploads/mlot-history/paths/` or `Historical_1min`) using only information available at decision time (e.g., fixed hold windows, protective stop/floor rules, realistic fills) and report the actual causal results objectively.
+- **Never dismiss positive total-₹ / right-skewed results because of a negative or flat median (or `<50%` win rate).** Profitable trading strategies are routinely right-skewed (many small flat/capped outcomes offset by large winners). Always evaluate and report **total net ₹**, **avg ₹/day**, **profit factor**, **best/worst trade**, and **downside risk** — never use median alone to veto a net-profitable edge.
+
+
