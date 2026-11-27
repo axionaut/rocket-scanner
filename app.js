@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 13:53 IST'; // release build date (IST)
-const APP_VERSION=1822;
+const BUILD_TS='2026-11-27 14:03 IST'; // release build date (IST)
+const APP_VERSION=1823;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -6050,7 +6050,10 @@ function exitCellHtml(s){
   if(sl>0&&p.stopConfirmed&&p.stopGttId){
     const mode=a?.mode==='MINIMUM'?'minimum trail':a?.mode==='TIGHTENING'?'tightening':'ATR trail';
     const detail=Number(a?.initialAtr)>0?'Initial ATR ₹'+Number(a.initialAtr).toFixed(2)+'; current distance ₹'+Number(a.distance||0).toFixed(2):'Existing locked protection retained';
-    return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="${detail}; server stop rises on rebounds; this is the broker-confirmed trigger"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> <span style="color:var(--t3)">(${mode})</span></div>`;
+    const ph=p.profitHold&&p.profitHold.until>Date.now()?p.profitHold:null;
+    const holdRem=ph?Math.max(1,Math.ceil((ph.until-Date.now())/60000)):0;
+    const holdTag=ph?` <span style="color:var(--amber);font-weight:700" title="MLoT body-median hold (${ph.delayMin}m): holding above -0.25% floor ₹${Number(ph.floor||0).toFixed(2)} until new high or timer expiry">· Hold ${holdRem}m (fl ₹${Number(ph.floor||0).toFixed(2)})</span>`:'';
+    return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="${detail}; server stop rises on rebounds; this is the broker-confirmed trigger"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> <span style="color:var(--t3)">(${mode})</span>${holdTag}</div>`;
   }
   if(p.lossGttId&&p.lossGttQty>0&&p.lossGttTrigger>0&&!p.needsReconcile&&!p.lossUpdatePending)return `<span style="color:var(--amber)" title="Broker GTT covers ${p.lossGttQty} of ${p.qty} shares; its loss is reserved from booked profit">Funded SL ₹${Number(p.lossGttTrigger).toFixed(2)} · ${p.lossGttQty}/${p.qty}</span>`;
   if(p.lossFundingRequired&&!p.lossGttId){const local=Number(p.bracket?.proposedLower);return `<span style="color:var(--t3)" title="Local SL only; no broker loss stop confirmed">${local>0?'SL ₹'+local.toFixed(2)+' · ':''}awaiting funding</span>`;}
@@ -12745,7 +12748,9 @@ function dashboardMarketCards(){
     add(2,'NSE',`${go} GO`,(floorModel()==='AVWAP_CROSS'?'Hard filters + 1st 5m close > T-2 AVWAP + 2-bar uptrend + CLV>=0.75':floorModel()==='TV_SCREENER'?'All 12 MA/Osc/Tech ratings Buy/Strong Buy · Day % ascending':floorModel()==='WAVE3_1M'?'Top-1 1m z-score in active wave window (09:20 / 10:30 / 13:00)':floorModel()==='CUM'?'Binary trigger rules satisfied':floorModel()==='MRMR'?'Original mRMR score >= floor (218 indicators)':'Top-five positive Ensemble shortlist with live VWAP confirmation')+' · SMC 5m layer');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
-    if(dep?.spec?.exit?.policy==='rs-atr5m-rebound-ratchet-v2')add(3,'NSE','ATR trailing stop','Trails new highs upward; no minimum or maximum hold');
+    const dynHold=Number(PROFIT_LOCK_STATUS?.mlotHistory?.completedPeakDelayMin);
+    const holdDesc=dynHold>0?` · Profit SL hold ${dynHold}m (-0.25% floor)`:' · Dynamic MLoT profit hold (-0.25% floor)';
+    if(dep?.spec?.exit?.policy==='rs-atr5m-rebound-ratchet-v2')add(3,'NSE','ATR trailing stop','Trails new highs upward'+holdDesc);
     else add(3,'NSE',signed(tgt),`Target ${signed(tgt)}${sl > 0 ? ` | SL -${sl.toFixed(1)}%` : ' | Ratcheting MLoT trail'}`);
   }
   if(m.us){

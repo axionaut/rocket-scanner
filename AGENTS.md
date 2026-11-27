@@ -161,4 +161,11 @@
 - **Test causally instead of dismissing:** When an observed historical metric (e.g., MLoT Peak Delay, post-exit drift, entry timing) points to potential extra profit, immediately run a causal forward test on the recorded 1-minute paths (`Scanner Uploads/mlot-history/paths/` or `Historical_1min`) using only information available at decision time (e.g., fixed hold windows, protective stop/floor rules, realistic fills) and report the actual causal results objectively.
 - **Never dismiss positive total-₹ / right-skewed results because of a negative or flat median (or `<50%` win rate).** Profitable trading strategies are routinely right-skewed (many small flat/capped outcomes offset by large winners). Always evaluate and report **total net ₹**, **avg ₹/day**, **profit factor**, **best/worst trade**, and **downside risk** — never use median alone to veto a net-profitable edge.
 
+## Dynamic MLoT Body-Median Profit Hold - owner, 27 November 2026
+
+- MLoT history (`dev/mlot-history.cjs`, `post-sell-same-day-body-high-v1822`) measures post-sell upside using **candle-body highs `max(O, C)`** and downside avoided using **wick lows `L`**.
+- Live and Compare paper exits read the evolving **completed-prior-sessions Body Median peak delay** (`MLOT_HISTORY.getCompletedPeakDelayMin()`, never hardcoded; requires >= 3 completed sessions). Auto `Target + %` (`MLOT_HISTORY.getWeightedMedian()`) also uses completed prior sessions only so in-progress mornings do not drag it down intraday.
+- On profitable trailing stops only (`stop >= breakeven`), crossing the tracked SL starts a dynamic hold up to `completedPeakDelayMin` (capped at `15:20` IST) with a hard **`-0.25%` protective floor** (`max(breakeven, SL * 0.9975)`). A new high clears the hold and resumes trailing; hitting the `-0.25%` floor or timer expiry exits immediately. Loss-bearing stops are unaffected.
+
+
 
