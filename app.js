@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 11:15 IST'; // release build date (IST)
-const APP_VERSION=1815;
+const BUILD_TS='2026-11-27 12:15 IST'; // release build date (IST)
+const APP_VERSION=1816;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10173,7 +10173,11 @@ function buildOpenPositionsPanel(query=''){
         },
         clrFn:()=>'var(--t1)'}
       :{key:'score',label:'Model Score',align:'right',bold:true,
-        fmt:(v,row)=>modelScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'\u2014'}</span>`,
+        fmt:(v,row)=>{
+          const why=v==null?(btstRanking()?.src?.watchlist?.[normSym(row.sym)]?.reason||''):'';
+          const tip=why?` title="${escHtml(why)}"`:'';
+          return `<span${tip}>${modelScoreCell(v)}<span style="font-size:11px;color:var(--t3)"> #${row.rank??'\u2014'}</span></span>`;
+        },
         clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
 

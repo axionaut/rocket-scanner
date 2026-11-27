@@ -145,3 +145,13 @@
 - With Auto-Buy on, show actionable GO for a funded IOC reservation. Claim locally and read broker orders and margins concurrently for final authorization, then read the current book again. Keep the existing IOC cap. 3-Wave uses the same completed signal minute across the rank, warms its five prior daily bars at startup, expires orders at the wave boundary, and permits one partial or full fill per wave. A confirmed unfilled order leaves the wave available.
 - Compare starts each LIVE segment flat and attributes new buys using broker order IDs or bridge tags. Earlier positions and unattributed fills stay outside model P&L. Display broker tradable cash and use broker equity at switches. Do not infer unsettled proceeds from the comparison ledger's cash.
 - Compare daily P&L uses a marked previous-session close or the flat comparison baseline when it was set later. An unverified historical close leaves daily P&L unavailable. Show LIVE gross open P&L and estimated buy charges alongside net open P&L.
+
+## Mandatory UI Table & Streaming Sync Protocol - owner, 27 November 2026
+
+- Whenever ANY model, filter, exit rule, or backend change affects data shown in any table or panel, update and verify ALL affected UI tables and live streams before releasing:
+  1. `dev/page-events.cjs` `META` includes any new/updated payload keys so SSE never strips live state.
+  2. **Rankings table** renders scores, `GO`/`WAIT` reasons, and column layout properly.
+  3. **Open Positions table** (`buildOpenPositionsPanel` in `app.js`) displays the active model's live score, rank, target/SL state, and exclusion/wait tooltip for every held stock.
+  4. **Latest Session / Performance**, **Compare tab**, and **Methodology tab** all reflect the current model, filters, score scale, and exit/funding rules.
+  5. Verify live server-side Auto-Buy (`autoTrigger*Buy`), `readBtstMinScore`, and `bridge-entry.cjs` `quoteTtl` stay aligned with the UI.
+

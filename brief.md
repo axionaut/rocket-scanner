@@ -1,10 +1,11 @@
-# Active Task: Deployed v1815 / Operational
+# Active Task: Deployed v1816 / Operational
 
-Rocket Scanner v1815 deployed at 2026-11-27 11:15 IST. System operational and in sync with origin/master.
+Rocket Scanner v1816 deployed at 2026-11-27 12:15 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1816:** Add Open Positions model-score reason tooltip, UI table sync protocol, and keep 3-Wave scores visible during minute rollover
 - **v1815:** Verify NSE entry bands and wave funding, and reconcile Compare P&L
 - **v1814:** Add configurable Day % band filter (default no limits) applied across all models
 - **v1813:** Self-heal historical live-equity drawdown spikes on ModelComparison startup
