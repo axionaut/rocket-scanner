@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-27 13:09 IST'; // release build date (IST)
-const APP_VERSION=1819;
+const BUILD_TS='2026-11-27 13:29 IST'; // release build date (IST)
+const APP_VERSION=1820;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8662,15 +8662,17 @@ function mlotHistoryHtml(){
   const sum=k=>days.reduce((n,s)=>n+(Number(s[k])||0),0);
   const weightedMedian=RocketStrategy.weightedMlotMedian(days);
   const weightedMedianHtml=weightedMedian==null?'—':`<span title="Covered-stock-weighted harmonic mean of daily medians. Lower medians receive higher weight. Covered zero medians make the mean zero.">Weighted ${pc(weightedMedian)}</span>`;
+  const daySavedPct=s=>(Number(s.proceedsRs)>0&&Number.isFinite(Number(s.savedRs)))?(Number(s.savedRs)/Number(s.proceedsRs))*100:null;
+  const totProceeds=sum('proceedsRs'),totSavedPct=totProceeds>0?(sum('savedRs')/totProceeds)*100:null;
   const delays=days.map(s=>s.medianPeakDelayMin).filter(Number.isFinite).sort((a,b)=>a-b);
   const midDelay=delays.length?(delays.length%2?delays[(delays.length-1)/2]:(delays[delays.length/2-1]+delays[delays.length/2])/2):null;
   const th=(t,a='right',tip='')=>`<th style="padding:6px 10px;text-align:${a};white-space:nowrap"${tip?` title="${escHtml(tip)}"`:''}>${t}</th>`;
   const td=(v,c='var(--t2)',a='right')=>`<td style="padding:7px 10px;text-align:${a};white-space:nowrap;color:${c};font-family:'DM Mono',monospace">${v}</td>`;
-  const row=s=>`<tr>${td(s.day+(s.proxyStocks?' (NSE proxy)':''),'var(--t1)','left')}${td(s.fills)}${td(s.stocks+(s.unknownStocks?' ('+s.coveredStocks+' covered)':''))}${td(rs(s.totalRs),'var(--red)')}${td(pc(s.medianPct),'var(--red)')}${td(rs(s.savedRs),'var(--green)')}${td(mins(s.medianPeakDelayMin))}</tr>`;
-  const total=`<tr style="border-top:1px solid var(--border);font-weight:700">${td(`Total (${days.length} days)`,'var(--t2)','left')}${td(sum('fills'))}${td(sum('stocks'))}${td(rs(sum('totalRs')),'var(--red)')}${td(weightedMedianHtml,'var(--red)')}${td(rs(sum('savedRs')),'var(--green)')}${td(midDelay==null?'—':'Median '+mins(midDelay))}</tr>`;
+  const row=s=>`<tr>${td(s.day+(s.proxyStocks?' (NSE proxy)':''),'var(--t1)','left')}${td(s.fills)}${td(s.stocks+(s.unknownStocks?' ('+s.coveredStocks+' covered)':''))}${td(rs(s.totalRs),'var(--red)')}${td(pc(s.medianPct),'var(--red)')}${td(rs(s.savedRs),'var(--green)')}${td(pc(daySavedPct(s)),'var(--green)')}${td(mins(s.medianPeakDelayMin))}</tr>`;
+  const total=`<tr style="border-top:1px solid var(--border);font-weight:700">${td(`Total (${days.length} days)`,'var(--t2)','left')}${td(sum('fills'))}${td(sum('stocks'))}${td(rs(sum('totalRs')),'var(--red)')}${td(weightedMedianHtml,'var(--red)')}${td(rs(sum('savedRs')),'var(--green)')}${td(totSavedPct==null?'—':'Weighted '+pc(totSavedPct),'var(--green)')}${td(midDelay==null?'—':'Median '+mins(midDelay))}</tr>`;
   return `<div style="margin-top:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden"><div style="padding:10px 16px 4px;font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">MLoT history <span style="font-weight:400;color:var(--t3);text-transform:none;letter-spacing:0">helper record, one row per session</span></div>
     <div style="padding:0 16px 6px;color:var(--t3);font-size:12px">Left on table = rise above each sale price to its later same-day high. Downside avoided = fall below each sale price to its later same-day low. Both tables use the same recorded fills and one-minute observations. BSE sales use NSE prices when BSE prices are unavailable (NSE proxy). Missing observations are excluded from amounts. Medians are per covered stock. Hindsight measures for review only, not executable profit.</div>
-    <div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr style="font-size:12px;text-transform:uppercase;color:var(--t3)">${th('Day','left')}${th('Sales')}${th('Stocks')}${th('Left on table ₹')}${th('Median %')}${th('Downside avoided ₹')}${th('Median peak delay')}</tr></thead><tbody>${days.map(row).join('')}${total}</tbody></table></div></div>`;
+    <div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr style="font-size:12px;text-transform:uppercase;color:var(--t3)">${th('Day','left')}${th('Sales')}${th('Stocks')}${th('Left on table ₹')}${th('Median %')}${th('Downside avoided ₹')}${th('Avoided %')}${th('Median peak delay')}</tr></thead><tbody>${days.map(row).join('')}${total}</tbody></table></div></div>`;
 }
 // 19 Oct: the helper's reconciled weighted cost of lots held at today's open. Zerodha's holdings average is
 // broker-netted (a same-day sell + rebuy keeps the old lot's price), which turned BLUSPRING's +Rs 86 sale into -Rs 360.
@@ -9852,6 +9854,7 @@ function buildLatestSessionPanel(query=''){
        :`<span style="color:var(--t3)">—</span>`,
      clrFn:leftClr,...pctTot},
     {key:'moneySavedRs',label:'Avoided '+String.fromCharCode(8377),align:'right',bold:true,fmt:(v,r)=>v!=null?'<span title="'+escHtml(r.moneySavedNote||'')+'">'+fmtINR(v)+'</span>':'&#8212;',clrFn:()=> 'var(--green)',totFmt:v=>v!=null?fmtINR(v):'&#8212;',totClrFn:()=> 'var(--green)'},
+    {key:'moneySavedPct',label:'Avoided %',align:'right',fmt:(v,r)=>v!=null?`<span title="${escHtml(r.moneySavedNote||'')}">${Number(v).toFixed(2)}%</span>`:'<span style="color:var(--t3)">—</span>',clrFn:()=> 'var(--green)',totFmt:v=>v!=null?`Weighted ${Number(v).toFixed(2)}%`:'—',totClrFn:()=> 'var(--green)'},
     // v1119: how long after the exit the day's high arrived. Positive = waiting would have paid.
     {key:'highGapMin',label:'Peak time',align:'right',
      fmt:(v,r)=>{
@@ -9915,6 +9918,7 @@ function buildLatestSessionPanel(query=''){
       sym:`Total (${rows.length})${latestUnknownRows?` <span style="color:var(--amber)">&#9888; excludes ${latestUnknownRows} unknown</span>`:''}`,
       qty:_sum('qty'),
       moneySavedRs:shownSummary.savedCount?shownSummary.savedRs:null,
+      moneySavedPct:shownSummary.savedCount?shownSummary.savedPct:null,
       leftOnTableRs:shownSummary.leftCount?shownSummary.leftRs:null,
       leftOnTablePct:shownSummary.leftCount?shownSummary.leftPct:null,mlotMedianPct:shownSummary.mlotMedianPct,mlotCount:shownSummary.leftCount,mlotMedianRs:shownSummary.mlotMedianRs,largestContributionPct:shownSummary.largestContributionPct,peakCount:shownSummary.peakCount,
       _brok:_sum('_brok'),_stt:_sum('_stt'),_txn:_sum('_txn'),_gst:_sum('_gst'),_sebi:_sum('_sebi'),_stamp:_sum('_stamp'),_dp:_sum('_dp'),
@@ -9975,6 +9979,7 @@ function buildLatestSessionPanel(query=''){
       sym:`Total (${rows.length})`,
       qty:rows.reduce((n,r)=>n+(Number(r.qty)||0),0),
       moneySavedRs:tbSummary.savedCount?tbSummary.savedRs:null,
+      moneySavedPct:tbSummary.savedCount?tbSummary.savedPct:null,
       leftOnTableRs:tbSummary.leftCount?tbSummary.leftRs:null,
       leftOnTablePct:tbSummary.leftCount?tbSummary.leftPct:null,mlotMedianPct:tbSummary.mlotMedianPct,mlotCount:tbSummary.leftCount,mlotMedianRs:tbSummary.mlotMedianRs,largestContributionPct:tbSummary.largestContributionPct,highGapMin:tbSummary.peakMedianMin,peakCount:tbSummary.peakCount,
       charges:rows.reduce((s,r)=>s+(r.charges||0),0),
